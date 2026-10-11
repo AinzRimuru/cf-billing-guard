@@ -1,8 +1,8 @@
 /**
- * cf-billing-guard CLI 测试（node --test）。
- * 在临时目录里模拟宿主项目（wrangler 配置 + Worker 入口），
- * 跑 cli.js enable / disable 验证：包装文件生成、配置外科手术式修改、
- * 幂等、dry-run、toml 支持、限额参数透传。
+ * cf-billing-guard CLI tests (node --test).
+ * Simulates a host project (wrangler config + Worker entry) in a temp dir and
+ * runs cli.js enable / disable to verify: wrapper generation, surgical config
+ * patching, idempotency, dry-run, toml support and limit flag passthrough.
  */
 
 import test from 'node:test';
@@ -21,7 +21,7 @@ function runCli(args, cwd) {
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
 
-/** 建一个模拟宿主项目：wrangler.jsonc + src/worker.js */
+/** Create a mock host project: wrangler config + src/worker.js */
 function fixtureHost({ config = 'wrangler.jsonc' } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfbg-'));
   fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
@@ -34,7 +34,7 @@ function fixtureHost({ config = 'wrangler.jsonc' } = {}) {
   } else if (config.endsWith('.jsonc') || config.endsWith('.json')) {
     fs.writeFileSync(
       path.join(dir, config),
-      `{\n  // 顶部注释必须保留\n  "name": "demo",\n  "main": "src/worker.js",\n  "compatibility_date": "2025-07-01"\n}\n`
+      `{\n  // top-level comment must be preserved\n  "name": "demo",\n  "main": "src/worker.js",\n  "compatibility_date": "2025-07-01"\n}\n`
     );
   }
   return dir;
@@ -48,14 +48,14 @@ function readMain(dir, config = 'wrangler.jsonc') {
     const m = text.match(/^main\s*=\s*"(\S+)"\s*(?:#.*)?$/m);
     return m && m[1];
   }
-  // jsonc：去注释后解析（fixture 内容不含字符串内 //，直接全局剥离）
+  // jsonc: strip comments, then parse (fixtures contain no // inside strings)
   const noComment = text.replace(/\/\/[^\n]*/g, '');
   return JSON.parse(noComment).main;
 }
 
 // ---------- enable ----------
 
-test('CLI enable: 生成包装入口 + 外科手术式改 main（jsonc，注释保留）', () => {
+test('CLI enable: generates wrapper entry + surgically patches main (jsonc, comments preserved)', () => {
   const dir = fixtureHost();
   const r = runCli(['enable'], dir);
   assert.equal(r.code, 0, r.out);
@@ -72,13 +72,13 @@ test('CLI enable: 生成包装入口 + 外科手术式改 main（jsonc，注释�
 
   assert.equal(readMain(dir), 'src/billing-guard.main.js');
   const cfgText = fs.readFileSync(path.join(dir, 'wrangler.jsonc'), 'utf8');
-  assert.ok(cfgText.includes('// 顶部注释必须保留'), '原有注释被保留');
-  assert.ok(cfgText.includes('"name": "demo"'), '其余配置不动');
+  assert.ok(cfgText.includes('// top-level comment must be preserved'), 'original comment preserved');
+  assert.ok(cfgText.includes('"name": "demo"'), 'other config untouched');
 
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('CLI enable: --import 指定包名；--d1/--kv/--on-exceed 透传到生成文件', () => {
+test('CLI enable: --import overrides the package name; --d1/--kv/--on-exceed reach the wrapper', () => {
   const dir = fixtureHost();
   const r = runCli(['enable', '--import', 'cf-billing-guard', '--d1', '50', '--kv', '20', '--on-exceed', 'empty'], dir);
   assert.equal(r.code, 0, r.out);
@@ -90,20 +90,20 @@ test('CLI enable: --import 指定包名；--d1/--kv/--on-exceed 透传到生成�
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('CLI enable 幂等：重复执行不改动', () => {
+test('CLI enable is idempotent: re-running changes nothing', () => {
   const dir = fixtureHost();
   assert.equal(runCli(['enable'], dir).code, 0);
   const cfgBefore = fs.readFileSync(path.join(dir, 'wrangler.jsonc'), 'utf8');
   const wrapperBefore = fs.readFileSync(path.join(dir, WRAPPER), 'utf8');
   const r = runCli(['enable'], dir);
   assert.equal(r.code, 0);
-  assert.ok(r.out.includes('已处于启用状态'), r.out);
+  assert.ok(r.out.includes('already enabled'), r.out);
   assert.equal(fs.readFileSync(path.join(dir, 'wrangler.jsonc'), 'utf8'), cfgBefore);
   assert.equal(fs.readFileSync(path.join(dir, WRAPPER), 'utf8'), wrapperBefore);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('CLI enable --dry-run: 不写任何文件', () => {
+test('CLI enable --dry-run: writes nothing', () => {
   const dir = fixtureHost();
   const cfgBefore = fs.readFileSync(path.join(dir, 'wrangler.jsonc'), 'utf8');
   const r = runCli(['enable', '--dry-run'], dir);
@@ -114,26 +114,26 @@ test('CLI enable --dry-run: 不写任何文件', () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('CLI enable: 生成的包装入口可被 import，fetch 已接入 guard', async () => {
+test('CLI enable: the generated wrapper imports cleanly and fetch is guarded', async () => {
   const dir = fixtureHost();
   assert.equal(runCli(['enable'], dir).code, 0);
   const mod = await import(pathToFileURL(path.join(dir, WRAPPER)).href);
   assert.equal(typeof mod.default.fetch, 'function');
   const res = await mod.default.fetch(
     { method: 'GET', url: 'https://x.test/' },
-    { OTHER: 'x' } // 无 D1/KV 绑定的 env 也应正常工作
+    { OTHER: 'x' } // env without D1/KV bindings must work too
   );
   assert.equal(res instanceof Response || typeof res.then !== 'function', true);
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('CLI enable/disable: wrangler.toml 支持', () => {
+test('CLI enable/disable: wrangler.toml support', () => {
   const dir = fixtureHost({ config: 'wrangler.toml' });
   const r = runCli(['enable'], dir);
   assert.equal(r.code, 0, r.out);
   assert.equal(readMain(dir, 'wrangler.toml'), 'src/billing-guard.main.js');
   const toml = fs.readFileSync(path.join(dir, 'wrangler.toml'), 'utf8');
-  assert.ok(toml.includes('# demo worker'), 'toml 原注释保留');
+  assert.ok(toml.includes('# demo worker'), 'toml comment preserved');
 
   const r2 = runCli(['disable'], dir);
   assert.equal(r2.code, 0, r2.out);
@@ -144,22 +144,22 @@ test('CLI enable/disable: wrangler.toml 支持', () => {
 
 // ---------- disable ----------
 
-test('CLI disable: main 恢复原值、包装文件删除、配置校验通过', () => {
+test('CLI disable: main restored, wrapper deleted, config stays valid', () => {
   const dir = fixtureHost();
   assert.equal(runCli(['enable'], dir).code, 0);
   const r = runCli(['disable'], dir);
   assert.equal(r.code, 0, r.out);
   assert.equal(readMain(dir), 'src/worker.js');
-  assert.ok(!fs.existsSync(path.join(dir, WRAPPER)), '包装文件已删除');
+  assert.ok(!fs.existsSync(path.join(dir, WRAPPER)), 'wrapper deleted');
   const cfgText = fs.readFileSync(path.join(dir, 'wrangler.jsonc'), 'utf8');
-  assert.ok(cfgText.includes('// 顶部注释必须保留'));
+  assert.ok(cfgText.includes('// top-level comment must be preserved'));
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-test('CLI disable: 未接线时安全退出', () => {
+test('CLI disable: exits safely when nothing is wired', () => {
   const dir = fixtureHost();
   const r = runCli(['disable'], dir);
   assert.equal(r.code, 0, r.out);
-  assert.ok(r.out.includes('无需回滚'), r.out);
+  assert.ok(r.out.includes('nothing to revert'), r.out);
   fs.rmSync(dir, { recursive: true, force: true });
 });

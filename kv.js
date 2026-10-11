@@ -1,17 +1,17 @@
 /**
- * kv.js — KV 绑定包装器（Proxy，零侵入核心）。
+ * kv.js — KV binding wrapper (Proxy, zero-intrusion core).
  *
- * 计数口径（一次"调用"= 一次真实执行）：
- *   get / getWithMetadata → 1 次（reads）
- *   put                   → 1 次（writes）
- *   delete                → 1 次（deletes）
- *   list                  → 1 次（lists）
+ * Counting (one "call" = one real execution):
+ *   get / getWithMetadata → 1 (reads)
+ *   put                   → 1 (writes)
+ *   delete                → 1 (deletes)
+ *   list                  → 1 (lists)
  *
- * 拦截时（onExceed）：
- *   'throw' → rejected Promise（BillingGuardError）
- *   'empty' → 同构"空结果"：get → null（等价缓存未命中）、
- *             getWithMetadata → {value:null, metadata:null}、
- *             put/delete → undefined（视为成功但未写入）、
+ * Blocking (onExceed):
+ *   'throw' → rejected promise (BillingGuardError)
+ *   'empty' → neutral result: get → null (cache miss),
+ *             getWithMetadata → {value:null, metadata:null},
+ *             put/delete → undefined (treated as success, nothing written),
  *             list → {keys:[], list_complete:true}
  */
 
@@ -35,15 +35,15 @@ function neutralKV(method) {
 function keyOf(args) {
   const k = args && args[0];
   if (typeof k === 'string') return k.length > 80 ? k.slice(0, 80) + '…' : k;
-  if (k && typeof k.name === 'string') return k.name; // list 选项 {prefix:...} 等仅记 name
+  if (k && typeof k.name === 'string') return k.name; // list options {prefix:...}: name only
   return undefined;
 }
 
 /**
- * 包装 KV 绑定。
- * @param {KVNamespace} ns 原始绑定
- * @param {Ledger} ledger 本请求账本
- * @param {string} binding 绑定名
+ * Wrap a KV binding.
+ * @param {KVNamespace} ns raw binding
+ * @param {Ledger} ledger per-request ledger
+ * @param {string} binding binding name
  */
 export function wrapKV(ns, ledger, binding) {
   return new Proxy(ns, {

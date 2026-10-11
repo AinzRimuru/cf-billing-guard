@@ -1,16 +1,14 @@
 /**
- * ledger.js — 单请求调用账本（模块核心状态）。
+ * ledger.js — per-request call ledger (core state).
  *
- * 每个入站请求创建一个 Ledger，按绑定名记录 D1/KV 的真实调用次数，
- * 达到 maxCalls 后按 onExceed 策略拦截：
- *   - 'throw'（默认）：以 Promise rejection 抛 BillingGuardError，
- *     让业务代码既有的 try/catch、.catch(()=>{}) 降级路径原样生效；
- *   - 'empty'：返回"空结果"（见 d1.js/kv.js 的 neutral*），
- *     业务侧表现为"查不到数据"，同样无需改动代码。
+ * One Ledger per inbound request. Tracks real call counts per binding name
+ * and blocks calls once maxCalls is reached, per the onExceed policy:
+ *   - 'throw' (default): rejected promise carrying BillingGuardError, so
+ *     existing try/catch or .catch(() => {}) fallbacks keep working;
+ *   - 'empty': neutral result (see d1.js / kv.js), reads as "no data".
  *
- * 约束：所有拦截都以 rejection / 空结果形式出现，绝不同步 throw ——
- * 否则 `env.DB.prepare(...).bind(...).run().catch(...)` 这类链式调用
- * 会在 .catch 挂上前就抛出，破坏业务侧降级。
+ * Invariant: blocking surfaces as a rejection or a return value, never a
+ * synchronous throw — chained calls attach .catch() only after the call.
  */
 
 export class BillingGuardError extends Error {
@@ -26,7 +24,7 @@ export class BillingGuardError extends Error {
   }
 }
 
-/** 单个绑定的计数 + 策略 */
+/** Counter + policy for a single binding. */
 class Slot {
   constructor(name, kind, policy) {
     this.name = name;
@@ -34,7 +32,7 @@ class Slot {
     this.maxCalls = policy.maxCalls;
     this.onExceed = policy.onExceed; // 'throw' | 'empty'
     this.used = 0;
-    this.blocked = 0; // 被拦截的调用数（观测用）
+    this.blocked = 0; // blocked calls (observability)
     this.exceededNotified = false;
   }
 
@@ -43,9 +41,9 @@ class Slot {
   }
 
   /**
-   * 预定 n 次调用额度。返回 'allow' 或 'block'。
-   * n 允许 >1（D1 batch 按语句数计）——放行后绝不允许半量执行，
-   * 因此只要 used+n > maxCalls 就整体拦截。
+   * Reserve budget for n calls. Returns 'allow' or 'block'.
+   * n > 1 is allowed (D1 batch counts per statement) — a batch is never
+   * partially executed, so used+n > maxCalls blocks the whole thing.
    */
   reserve(n) {
     if (this.maxCalls === Infinity || this.used + n <= this.maxCalls) return 'allow';
@@ -60,14 +58,14 @@ class Slot {
 
 export class Ledger {
   /**
-   * @param {object} options withBillingGuard 的原始 options（见 index.js）
+   * @param {object} options the original withBillingGuard options (see index.js)
    */
   constructor(options) {
     this.options = options;
     this.slots = new Map(); // binding name -> Slot
   }
 
-  /** 解析某绑定的策略：bindings[name] > [kind] > defaults */
+  /** Resolve the policy for a binding: bindings[name] > [kind] > defaults */
   policyFor(name, kind) {
     const o = this.options || {};
     const defaults = { maxCalls: 100, onExceed: 'throw', ...(o.defaults || {}) };
@@ -86,8 +84,9 @@ export class Ledger {
   }
 
   /**
-   * 执行前检查。返回 'allow' | 'block'（block 时调用方决定 throw 还是空结果）。
-   * 首次超限时触发 options.onExceeded 回调（告警一次/绑定/请求）。
+   * Pre-execution check. Returns 'allow' | 'block' (the caller decides
+   * between throwing and a neutral result). Fires options.onExceeded on the
+   * first blocked call per binding per request.
    */
   beforeCall(binding, kind, method, n = 1) {
     const slot = this.slotFor(binding, kind);
@@ -115,7 +114,7 @@ export class Ledger {
     return 'allow';
   }
 
-  /** 真实调用完成后记账 + count 回调（指标用） */
+  /** Record a completed real call + fire the count callback (metrics). */
   afterCall(binding, kind, method, detail = {}, n = 1) {
     const slot = this.slotFor(binding, kind);
     slot.commit(n);
@@ -126,7 +125,7 @@ export class Ledger {
     }
   }
 
-  /** 构造超限错误（含当前计数信息） */
+  /** Build the limit-exceeded error with current counters. */
   exceededError(binding, kind, method) {
     const slot = this.slotFor(binding, kind);
     return new BillingGuardError({
@@ -138,7 +137,7 @@ export class Ledger {
     });
   }
 
-  /** 请求结束时的用量摘要（onRequestEnd 回调 / 测试用） */
+  /** Usage summary at end of request (onRequestEnd callback / tests). */
   summary() {
     return {
       bindings: [...this.slots.values()].map((s) => ({

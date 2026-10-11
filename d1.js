@@ -1,20 +1,20 @@
 /**
- * d1.js — D1 绑定包装器（Proxy，零侵入核心）。
+ * d1.js — D1 binding wrapper (Proxy, zero-intrusion core).
  *
- * 计数口径（一次"调用"= 一次真实执行）：
- *   statement 终结方法 first/all/run/raw/values ......... 1 次
- *   db.batch([s1, s2, s3]) .............................. N 次（按语句数）
- *   db.exec(sql) ........................................ 1 次
- *   db.withSession(fn) 内部的调用 ....................... 经包装的 session 正常计数
- *   仅 prepare()/bind() 未执行 .......................... 不计数
+ * Counting (one "call" = one real execution):
+ *   terminal methods first/all/run/raw/values ..... 1
+ *   db.batch([s1..sN]) ............................ N (one per statement)
+ *   db.exec(sql) .................................. 1
+ *   db.withSession(fn) ............................ counted via wrapped session
+ *   prepare()/bind() without executing ............ 0
  *
- * 拦截时（onExceed）：
- *   'throw' → 终结方法返回 rejected Promise（BillingGuardError）
- *   'empty' → 返回与真实 API 同构的"空结果"：
- *     all() → {results:[], success:true, meta:0行}    first() → null
- *     run() → {success:true, meta:0行}                raw()/values() → []
- *     batch() → 每条语句一个空结果
- * 这样业务侧 try/catch、`.catch(()=>{})`、空结果判断等既有逻辑无需任何改动。
+ * Blocking (onExceed):
+ *   'throw' → terminal method returns a rejected promise (BillingGuardError)
+ *   'empty' → returns a neutral result shaped like the real API:
+ *     all() → {results:[], success:true, meta:zeroed}    first() → null
+ *     run() → {success:true, meta:zeroed}                raw()/values() → []
+ *     batch() → one neutral result per statement
+ * Existing try/catch, .catch(() => {}) and empty-result checks keep working.
  */
 
 export const WRAPPED = Symbol.for('cf-billing-guard.wrapped');
@@ -27,7 +27,7 @@ function zeroMeta() {
   return { changes: 0, last_row_id: 0, duration_ms: 0, rows_read: 0, rows_written: 0 };
 }
 
-/** 各方法的"空结果"（与 D1 真实返回同构） */
+/** Neutral result per method, shaped like the real D1 API. */
 export function neutralD1(method, count = 1) {
   switch (method) {
     case 'first':
@@ -52,7 +52,7 @@ function shortSql(sql) {
   return s.length > 80 ? s.slice(0, 80) + '…' : s;
 }
 
-/** 包装单个 D1PreparedStatement（保持链式 bind 可用） */
+/** Wrap a single D1PreparedStatement (keeps chained bind() usable). */
 function wrapStatement(stmt, sql, ctx) {
   return new Proxy(stmt, {
     get(target, prop) {
@@ -85,7 +85,7 @@ async function execTerminal(real, method, sql, ctx) {
 }
 
 async function runBatch(dbReal, stmts, ctx) {
-  const reals = stmts.map((s) => (s && s[REAL]) || s);
+  const reals = stmts.map((s) => (s && s[REAL]) || s); // unwrap proxies
   const n = reals.length;
   const decision = ctx.ledger.beforeCall(ctx.binding, 'd1', 'batch', n);
   if (decision === 'throw') throw ctx.ledger.exceededError(ctx.binding, 'd1', 'batch');
@@ -104,7 +104,7 @@ async function runExec(dbReal, sql, ctx) {
   return res;
 }
 
-/** D1Database / D1Session 共用：拦截 prepare/batch/exec（session 无 withSession） */
+/** Shared by D1Database / D1Session: intercept prepare/batch/exec (session has no withSession). */
 function proxyD1(target, ctx, { withSession = false } = {}) {
   return new Proxy(target, {
     get(t, prop) {
@@ -124,10 +124,10 @@ function proxyD1(target, ctx, { withSession = false } = {}) {
 }
 
 /**
- * 包装 D1 绑定。
- * @param {D1Database} db 原始绑定
- * @param {Ledger} ledger 本请求账本
- * @param {string} binding 绑定名（env 上的属性名）
+ * Wrap a D1 binding.
+ * @param {D1Database} db raw binding
+ * @param {Ledger} ledger per-request ledger
+ * @param {string} binding binding name (property on env)
  */
 export function wrapD1(db, ledger, binding) {
   return proxyD1(db, { ledger, binding }, { withSession: true });

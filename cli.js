@@ -1,34 +1,36 @@
 #!/usr/bin/env node
 /**
- * cf-billing-guard CLI — 自动接线 / 回滚（方案 A：包装入口）。
+ * cf-billing-guard CLI — automatic wiring / rollback (wrapper entry approach).
  *
- * enable：
- *   1. 从 wrangler 配置（wrangler.jsonc / wrangler.json / wrangler.toml，自动探测）
- *      读取当前 main（= 原始 Worker 入口）；
- *   2. 在同目录生成包装入口 billing-guard.main.js（含回滚标记 cf-billing-guard:entry=...）；
- *   3. 外科手术式修改 wrangler 配置的 main 一行 —— 只动这一行，注释/顺序/其余配置原样保留。
- * disable：
- *   1. 从包装文件的标记读回原始入口；
- *   2. main 改回原值，删除生成的包装文件。
+ * enable:
+ *   1. Read the current `main` from the wrangler config (wrangler.jsonc /
+ *      wrangler.json / wrangler.toml, auto-detected);
+ *   2. Generate a wrapper entry `billing-guard.main.js` next to it, tagged
+ *      with `cf-billing-guard:entry=...` for rollback;
+ *   3. Surgically patch only the `main` line in the config — comments,
+ *      ordering and everything else are preserved as-is.
+ * disable:
+ *   1. Read the original entry back from the wrapper's marker;
+ *   2. Restore `main` and delete the generated wrapper.
  *
- * 两次执行 enable 幂等（已启用则跳过）；所有改动均可 --dry-run 预览。
+ * `enable` is idempotent; every change can be previewed with --dry-run.
  *
- * 用法：
+ * Usage:
  *   npx cf-billing-guard enable  [--entry <path>] [--out <path>] [--config <path>]
  *                                [--import <specifier>] [--d1 <n>] [--kv <n>]
  *                                [--on-exceed throw|empty] [--force] [--dry-run]
- *   npx cf-billing-guard disable [--config <path>] [--keep] [--dry-run]
+ *   npx cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
  */
 
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const HERE = path.dirname(fileURLToPath(import.meta.url)); // 包根（或仓库检出位置）
+const HERE = path.dirname(fileURLToPath(import.meta.url)); // package root (or repo checkout)
 const MARKER_RE = /^\s*\/\/\s*cf-billing-guard:entry=(\S+)\s*$/m;
 const PKG_NAME = 'cf-billing-guard';
 
-// ---------- 参数 ----------
+// ---------- args ----------
 
 function parseArgs(argv) {
   const cmd = argv[0] && !argv[0].startsWith('--') ? argv[0] : 'enable';
@@ -48,18 +50,21 @@ function parseArgs(argv) {
 }
 
 const fail = (msg) => {
-  console.error('[cf-billing-guard] 错误：' + msg);
+  console.error('[cf-billing-guard] error: ' + msg);
   process.exit(1);
 };
 const log = (msg) => console.log('[cf-billing-guard] ' + msg);
 
-// ---------- 运行环境探测 ----------
+// ---------- environment detection ----------
 
 /**
- * 是否作为已安装的 npm 包运行（决定生成的包装文件 import 包名还是相对路径）。
- * 两条线索任一命中即视为已安装：
- *   - 本文件所在路径（import.meta.url，符号链接已被 Node 解析为真实路径）
- *   - 进程入口路径（process.argv[1]，经 node_modules/.bin 壳脚本调用时保留 node_modules 段）
+ * Whether we are running as an installed npm package (decides whether the
+ * generated wrapper imports the package name or a relative path). Either
+ * hint wins:
+ *   - this file's path (import.meta.url; symlinks are resolved to the real
+ *     path by Node)
+ *   - the process entry (process.argv[1]; keeps the node_modules segment
+ *     when invoked through a node_modules/.bin shim)
  */
 function isInstalled() {
   const segments = (p) => path.resolve(p).split(path.sep);
@@ -68,24 +73,24 @@ function isInstalled() {
   return false;
 }
 
-// ---------- wrangler 配置（读取 + 外科手术式修改） ----------
+// ---------- wrangler config (read + surgical patch) ----------
 
 const CONFIG_CANDIDATES = ['wrangler.jsonc', 'wrangler.json', 'wrangler.toml'];
 
 function findConfig(explicit, cwd) {
   if (explicit) {
     const p = path.resolve(cwd, explicit);
-    if (!fs.existsSync(p)) fail(`wrangler 配置不存在：${p}`);
+    if (!fs.existsSync(p)) fail(`wrangler config not found: ${p}`);
     return p;
   }
   for (const name of CONFIG_CANDIDATES) {
     const p = path.join(cwd, name);
     if (fs.existsSync(p)) return p;
   }
-  fail(`未找到 wrangler 配置（${CONFIG_CANDIDATES.join(' / ')}），请用 --config 指定`);
+  fail(`no wrangler config found (${CONFIG_CANDIDATES.join(' / ')}); pass --config`);
 }
 
-/** 去掉 JSONC 注释（保留字符串字面量内的 // 与 /*） */
+/** Strip JSONC comments (preserves // and /* inside string literals). */
 function stripJsonComments(text) {
   let out = '';
   let i = 0;
@@ -126,7 +131,7 @@ function stripJsonComments(text) {
   return out;
 }
 
-/** 读取配置：返回 { path, text, isToml, main } */
+/** Read a config: returns { path, text, isToml, main }. */
 function readConfig(configPath) {
   const text = fs.readFileSync(configPath, 'utf8');
   const isToml = /\.toml$/i.test(configPath);
@@ -138,15 +143,15 @@ function readConfig(configPath) {
     try {
       main = JSON.parse(stripJsonComments(text)).main;
     } catch (e) {
-      fail(`wrangler 配置不是合法 JSON(C)：${configPath}（${e.message}）`);
+      fail(`wrangler config is not valid JSON(C): ${configPath} (${e.message})`);
     }
   }
   return { path: configPath, text, isToml, main };
 }
 
-/** 把 main 一行替换为新值（只动这一行；jsonc/toml 追加回滚注释，纯 json 不加）。返回新文本。 */
+/** Replace the main line with a new value (that line only; jsonc/toml get a revert comment, plain json does not). Returns the new text. */
 function patchMainInText(text, newMain, { isToml, configName, revertHint }) {
-  const wantComment = !/\.json$/i.test(configName); // jsonc / toml 可带注释
+  const wantComment = !/\.json$/i.test(configName); // jsonc / toml can carry comments
   const comment = wantComment ? (isToml ? ' # ' : ' // ') + revertHint : '';
   if (isToml) {
     const reToml = /^(\s*)main\s*=\s*(['"]).*?\2\s*(#.*)?$/m;
@@ -159,24 +164,24 @@ function patchMainInText(text, newMain, { isToml, configName, revertHint }) {
   if (reJson.test(text)) {
     return text.replace(reJson, (_m, indent, comma) => `${indent}"main": "${newMain}"${comma || ''}${comment}`);
   }
-  // 无 main 键：插到对象开头
+  // No main key: insert at the start of the object
   const idx = text.indexOf('{');
-  if (idx < 0) fail('wrangler 配置结构异常（找不到 "{"），请手工修改 main');
+  if (idx < 0) fail('unexpected wrangler config structure ("{" not found); patch main manually');
   return text.slice(0, idx + 1) + `\n  "main": "${newMain}",${comment}` + text.slice(idx + 1);
 }
 
-// ---------- 包装入口生成 / 识别 ----------
+// ---------- wrapper generation / detection ----------
 
 function relSpec(fromFile, toFile) {
   const from = path.dirname(path.resolve(fromFile));
   const to = path.resolve(toFile);
   const r = path.relative(from, to);
-  if (!r || path.isAbsolute(r)) return pathToFileURL(to).href; // 跨盘符（Windows）无法相对化 → file:// URL
+  if (!r || path.isAbsolute(r)) return pathToFileURL(to).href; // cross-drive (Windows) — use a file:// URL
   const s = r.replace(/\\/g, '/');
   return s.startsWith('.') ? s : './' + s;
 }
 
-/** withBillingGuard 的导入来源：显式指定 > 已安装包名 > 本地同仓模块 */
+/** Import source for withBillingGuard: explicit > installed package name > local module. */
 function defaultImportSource(outFile, explicit) {
   if (explicit) return explicit;
   if (isInstalled()) return PKG_NAME;
@@ -185,7 +190,7 @@ function defaultImportSource(outFile, explicit) {
   return PKG_NAME;
 }
 
-/** CLI 调用命令展示：已安装为包 → npx cf-billing-guard；本地仓库 → node <相对路径>/cli.js */
+/** Display form of the CLI command: installed → npx cf-billing-guard; repo → node <rel>/cli.js */
 function cliCommand(cwd) {
   if (isInstalled()) return `npx ${PKG_NAME}`;
   const rel = path.relative(cwd, path.join(HERE, 'cli.js')).replace(/\\/g, '/');
@@ -194,8 +199,8 @@ function cliCommand(cwd) {
 
 function wrapperContent({ entryMark, entrySpec, importSrc, d1, kv, onExceed, revertCmd }) {
   return `/**
- * cf-billing-guard 接线入口（自动生成，请勿提交业务逻辑；调整限额直接改下方 options）。
- * 生成：${revertCmd.replace(' disable ', ' enable ')}    回滚：${revertCmd}
+ * cf-billing-guard wiring entry (auto-generated — tune limits below).
+ * Enable: ${revertCmd.replace(' disable ', ' enable ')}    Revert: ${revertCmd}
  */
 // cf-billing-guard:entry=${entryMark}
 import worker from '${entrySpec}';
@@ -203,8 +208,8 @@ import { withBillingGuard } from '${importSrc}';
 
 export default withBillingGuard(worker, {
   defaults: { maxCalls: ${d1}, onExceed: '${onExceed}' },
-  d1: { maxCalls: ${d1} }, // 单请求 D1 调用上限
-  kv: { maxCalls: ${kv} }, // 单请求 KV 调用上限
+  d1: { maxCalls: ${d1} }, // per-request D1 call limit
+  kv: { maxCalls: ${kv} }, // per-request KV call limit
 });
 `;
 }
@@ -215,20 +220,20 @@ function markerEntry(file) {
   return m ? m[1] : null;
 }
 
-// ---------- 文件写入（--dry-run 时只打印） ----------
+// ---------- file writes (no-ops under --dry-run) ----------
 
 function makeWriter(dryRun) {
   return {
     write(file, content) {
-      if (dryRun) return log(`[dry-run] 将写入 ${file}（${content.length} 字节）`);
+      if (dryRun) return log(`[dry-run] would write ${file} (${content.length} bytes)`);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, content, 'utf8');
-      log(`已写入 ${file}`);
+      log(`wrote ${file}`);
     },
     remove(file) {
-      if (dryRun) return log(`[dry-run] 将删除 ${file}`);
+      if (dryRun) return log(`[dry-run] would delete ${file}`);
       fs.unlinkSync(file);
-      log(`已删除 ${file}`);
+      log(`deleted ${file}`);
     },
   };
 }
@@ -240,28 +245,28 @@ function enable(args, cwd) {
   const io = makeWriter(dryRun);
   const configPath = findConfig(args.config, cwd);
   const cfg = readConfig(configPath);
-  log(`wrangler 配置：${configPath}${cfg.main ? `（当前 main = ${cfg.main}）` : '（无 main）'}`);
+  log(`wrangler config: ${configPath}${cfg.main ? ` (current main = ${cfg.main})` : ' (no main)'}`);
 
-  // 原始入口：--entry 优先；当前 main 若已是本工具生成的包装文件则自动解包
+  // Original entry: --entry wins; if current main is our own wrapper, unwrap it
   let entry = args.entry || cfg.main;
-  if (!entry) fail('配置中无 main，请用 --entry 指定原始 Worker 入口');
+  if (!entry) fail('config has no main; pass --entry to specify the original Worker entry');
   const entryAbs = path.resolve(cwd, entry);
   const wrappedEntry = markerEntry(entryAbs);
   if (wrappedEntry) {
-    entry = wrappedEntry; // 已是包装文件 → 解出原始入口（幂等/换名场景）
-    log(`检测到 main 已是 cf-billing-guard 包装文件，原始入口 = ${entry}`);
+    entry = wrappedEntry; // already a wrapper → recover the original entry (idempotency / rename)
+    log(`main is already a cf-billing-guard wrapper; original entry = ${entry}`);
   }
   const outAbs = path.resolve(cwd, args.out || path.join(path.dirname(entry), 'billing-guard.main.js'));
-  log(`原始入口：${entry} → 包装入口：${path.relative(cwd, outAbs) || outAbs}`);
+  log(`original entry: ${entry} → wrapper: ${path.relative(cwd, outAbs) || outAbs}`);
 
-  // 已启用且文件在 → 幂等跳过
+  // Already enabled and file present → idempotent skip
   if (cfg.main && path.resolve(cwd, cfg.main) === outAbs && markerEntry(outAbs)) {
-    log('已处于启用状态，无需改动（如需重新生成请先 disable 或加 --force）');
+    log('already enabled, nothing to do (run disable first, or pass --force to regenerate)');
     return;
   }
-  // 覆盖保护：已存在的非本工具文件
+  // Overwrite protection: pre-existing file not generated by this tool
   if (fs.existsSync(outAbs) && !markerEntry(outAbs) && !args.force) {
-    fail(`${outAbs} 已存在且不是 cf-billing-guard 生成的文件；确认覆盖请加 --force`);
+    fail(`${outAbs} already exists and was not generated by cf-billing-guard; pass --force to overwrite`);
   }
 
   const outRel = path.relative(cwd, outAbs).replace(/\\/g, '/');
@@ -275,8 +280,8 @@ function enable(args, cwd) {
   io.write(
     outAbs,
     wrapperContent({
-      entryMark: entry, // 配置相对路径（cwd 相对），disable 回填 main 用
-      entrySpec: relSpec(outAbs, entryAbs), // import 说明符（包装文件相对）
+      entryMark: entry, // config-relative path; disable restores main from it
+      entrySpec: relSpec(outAbs, entryAbs), // import specifier, relative to the wrapper
       importSrc,
       d1,
       kv,
@@ -287,19 +292,19 @@ function enable(args, cwd) {
   const patched = patchMainInText(cfg.text, outRel.replace(/\\/g, '/'), {
     isToml: cfg.isToml,
     configName: path.basename(configPath),
-    revertHint: `cf-billing-guard 接线入口（原 ${entry}）；回滚：${revertCmd}`,
+    revertHint: `cf-billing-guard entry (was ${entry}); revert: ${revertCmd}`,
   });
-  // 自检：改完仍是合法 JSON(C)（TOML 仅尽力而为）
+  // Self-check: the patched config must still be valid JSON(C) (TOML is best-effort)
   if (!cfg.isToml) {
     try {
       JSON.parse(stripJsonComments(patched));
     } catch (e) {
-      fail(`修改后配置校验失败，已放弃写入（${e.message}）`);
+      fail(`patched config failed validation; aborting write (${e.message})`);
     }
   }
   io.write(configPath, patched);
-  log(`wrangler main 已指向 ${outRel}${dryRun ? '（dry-run 未写入）' : ''}`);
-  log('完成。业务入口文件零改动；回滚：' + revertCmd);
+  log(`wrangler main now points to ${outRel}${dryRun ? ' (dry-run, not written)' : ''}`);
+  log(`done. Business entry untouched; revert with: ${revertCmd}`);
 }
 
 function disable(args, cwd) {
@@ -308,34 +313,34 @@ function disable(args, cwd) {
   const configPath = findConfig(args.config, cwd);
   const cfg = readConfig(configPath);
 
-  // 从当前 main（或 --out 指向的包装文件）读回原始入口
+  // Read the original entry back from the current main (or --out)
   let wrapperAbs = cfg.main ? path.resolve(cwd, cfg.main) : null;
   if ((!wrapperAbs || !markerEntry(wrapperAbs)) && args.out) wrapperAbs = path.resolve(cwd, args.out);
   const entry = wrapperAbs && markerEntry(wrapperAbs);
   if (!entry) {
-    log('未发现 cf-billing-guard 接线（main 不是生成的包装文件），无需回滚');
+    log('no cf-billing-guard wiring found (main is not a generated wrapper); nothing to revert');
     return;
   }
   const patched = patchMainInText(cfg.text, entry, {
     isToml: cfg.isToml,
     configName: path.basename(configPath),
-    revertHint: `cf-billing-guard 已回滚`,
+    revertHint: `cf-billing-guard reverted`,
   });
   if (!cfg.isToml) {
     try {
       JSON.parse(stripJsonComments(patched));
     } catch (e) {
-      fail(`修改后配置校验失败，已放弃写入（${e.message}）`);
+      fail(`patched config failed validation; aborting write (${e.message})`);
     }
   }
   io.write(configPath, patched);
-  log(`wrangler main 已恢复为 ${entry}`);
+  log(`wrangler main restored to ${entry}`);
   if (args.keep) {
-    log(`保留包装文件 ${path.relative(cwd, wrapperAbs)}（--keep）`);
+    log(`kept wrapper file ${path.relative(cwd, wrapperAbs)} (--keep)`);
   } else {
     io.remove(wrapperAbs);
   }
-  log('回滚完成，业务零残留。');
+  log('revert complete, zero residue.');
 }
 
 // ---------- main ----------
@@ -344,4 +349,4 @@ const args = parseArgs(process.argv.slice(2));
 const cwd = process.cwd();
 if (args.cmd === 'enable') enable(args, cwd);
 else if (args.cmd === 'disable') disable(args, cwd);
-else fail(`未知命令：${args.cmd}（支持 enable / disable）`);
+else fail(`unknown command: ${args.cmd} (expected enable / disable)`);

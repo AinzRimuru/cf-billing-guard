@@ -1,28 +1,26 @@
 /**
- * index.js — cf-billing-guard 包入口。
+ * index.js — cf-billing-guard package entry.
  *
- * 用法（零侵入接线）：
- *   // main.js（新入口文件，原 Worker 文件零改动）
- *   import worker from './index.js';          // 你原有的 Worker
+ * Wraps a Worker entry so every inbound request gets a per-request Ledger and
+ * Proxy-wrapped D1/KV bindings. Business code keeps calling env.DB / env.KV
+ * exactly as before; calls beyond the per-request limit are blocked with a
+ * rejected promise or a neutral empty result.
+ *
+ * Manual wiring:
+ *   import worker from './index.js';
  *   import { withBillingGuard } from 'cf-billing-guard';
  *   export default withBillingGuard(worker, { d1: { maxCalls: 100 } });
  *
- * 或直接用 CLI 自动接线（推荐）：
- *   npm i -D cf-billing-guard && npx cf-billing-guard enable
- *
- * 原理：withBillingGuard 在每个入站请求开始时创建请求级 Ledger，用 Proxy 包装
- * env 上的 D1/KV 绑定（自动探测，或按 bindings 白名单），业务代码通过
- * env.DB / env.KV_NAMESPACE 照常调用 —— 语法、返回结构完全不变，
- * 仅在超出单请求调用上限时按策略 throw / 返回空结果。
+ * Prefer the CLI: npx cf-billing-guard enable
  *
  * options:
  *   defaults: { maxCalls?: number = 100, onExceed?: 'throw'|'empty' = 'throw' }
- *   d1:       同上，覆盖所有 D1 绑定
- *   kv:       同上，覆盖所有 KV 绑定
- *   bindings: { [name]: 同上 }  按绑定名覆盖（优先级最高）
- *   count(info)        每次真实调用后的回调（指标埋点）
- *   onExceeded(info)   某绑定首次超限时的回调（告警）
- *   onRequestEnd(summary)  请求结束后的用量摘要回调（日志）
+ *   d1:       same shape, overrides all D1 bindings
+ *   kv:       same shape, overrides all KV bindings
+ *   bindings: { [name]: same shape }  per-binding override (highest priority)
+ *   count(info)        after every real call (metrics)
+ *   onExceeded(info)   first blocked call per binding per request (alerting)
+ *   onRequestEnd(summary)  usage summary when the request ends (logging)
  */
 
 import { Ledger } from './ledger.js';
@@ -33,7 +31,7 @@ export { BillingGuardError } from './ledger.js';
 export { wrapD1 } from './d1.js';
 export { wrapKV } from './kv.js';
 
-/** 探测：D1Database（prepare/batch/exec） */
+/** Detect D1Database by shape (prepare/batch/exec). */
 function looksLikeD1(v) {
   return (
     v && typeof v === 'object' &&
@@ -43,7 +41,7 @@ function looksLikeD1(v) {
   );
 }
 
-/** 探测：KVNamespace（get/put/getWithMetadata） */
+/** Detect KVNamespace by shape (get/put/getWithMetadata). */
 function looksLikeKV(v) {
   return (
     v && typeof v === 'object' &&
@@ -53,17 +51,17 @@ function looksLikeKV(v) {
   );
 }
 
-/** 用请求级 Ledger 包装 env（每请求调用一次；绑定包装随请求丢弃，计数互不影响） */
+/** Wrap env with a per-request Ledger (call once per request; wrappers are discarded with it). */
 export function instrumentEnv(env, ledger) {
   if (!env || typeof env !== 'object') return env;
-  const cache = new Map(); // 本请求内 name -> 包装后的绑定
+  const cache = new Map(); // binding name -> wrapped binding, for this request
   return new Proxy(env, {
     get(target, prop) {
       if (typeof prop !== 'string') return Reflect.get(target, prop);
       const v = Reflect.get(target, prop);
       if (!v || typeof v !== 'object' || v[WRAPPED]) return v;
       if (!looksLikeD1(v) && !looksLikeKV(v)) return v;
-      // bindings 白名单（若配置）之外的绑定不包装
+      // bindings whitelist (when configured): anything not listed stays unwrapped
       const allow = ledger.options.bindings;
       if (allow && !Object.prototype.hasOwnProperty.call(allow, prop)) return v;
       if (cache.has(prop)) return cache.get(prop);
@@ -74,7 +72,7 @@ export function instrumentEnv(env, ledger) {
   });
 }
 
-/** 包装 Worker 入口 */
+/** Wrap a Worker entry. */
 export function withBillingGuard(worker, options = {}) {
   const wrapped = {
     async fetch(request, env, ctx) {
@@ -91,7 +89,7 @@ export function withBillingGuard(worker, options = {}) {
       }
     },
   };
-  // 透传其它处理器（scheduled 等），env 同样注入包装
+  // Pass through other handlers (scheduled, ...), injecting the wrapped env
   for (const name of ['scheduled', 'queue', 'test', 'email', 'tail']) {
     const h = worker[name];
     if (typeof h === 'function') {

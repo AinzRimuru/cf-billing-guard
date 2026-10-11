@@ -1,7 +1,8 @@
 /**
- * cf-billing-guard 核心测试（node --test）。
- * 用 mock 的 D1/KV 绑定验证：计数口径、单请求上限、throw/empty 两种拦截、
- * 既有业务代码降级路径（try/catch、.catch(()=>{})）无需改动即可工作。
+ * cf-billing-guard core tests (node --test).
+ * Mocked D1/KV bindings verify: counting rules, per-request limits, both
+ * block modes (throw/empty), and that existing business fallbacks
+ * (try/catch, .catch(() => {})) keep working unchanged.
  */
 
 import test from 'node:test';
@@ -46,7 +47,7 @@ function mockD1() {
     },
     async batch(stmts) {
       calls.push(['batch', stmts.length]);
-      db.batchReceived = stmts; // 记录实际收到的语句对象（用于验证 unwrap）
+      db.batchReceived = stmts; // record what actually reached the driver (unwrap check)
       return stmts.map(() => ({ success: true, meta: { rows_read: 1, rows_written: 1 } }));
     },
     async exec(sql) {
@@ -54,7 +55,7 @@ function mockD1() {
       return { success: true, meta: { rows_read: 0, rows_written: 0 } };
     },
     async withSession(fn) {
-      return fn(db); // 直接复用同一 mock
+      return fn(db); // reuse the same mock
     },
     batchReceived: null,
   };
@@ -88,14 +89,14 @@ function mockKV() {
 
 const req = () => ({ method: 'GET', url: 'https://x.test/v2/' });
 
-// ---------- D1 计数口径 ----------
+// ---------- D1 counting ----------
 
-test('D1: 终结方法各计 1 次；prepare/bind 不计数；链式调用可用', async () => {
+test('D1: terminal methods count 1 each; prepare/bind without execute is free', async () => {
   const db = mockD1();
-  let used = [];
+  const used = [];
   const worker = withBillingGuard(
     { fetch: async (r, env) => {
-        env.DB.prepare('SELECT 1').bind(1, 2); // 只 prepare+bind 不执行 → 0
+        env.DB.prepare('SELECT 1').bind(1, 2); // prepare+bind only → 0
         await env.DB.prepare('SELECT a').all();
         await env.DB.prepare('SELECT b').first();
         await env.DB.prepare('UPDATE c').run();
@@ -109,7 +110,7 @@ test('D1: 终结方法各计 1 次；prepare/bind 不计数；链式调用可用
   assert.equal(used.filter((i) => i.kind === 'd1').length, 4);
 });
 
-test('D1: batch 按语句数计数，且把真实语句透传给底层（unwrap）', async () => {
+test('D1: batch counts per statement and passes real statements through (unwrap)', async () => {
   const db = mockD1();
   const worker = withBillingGuard(
     { fetch: async (r, env) => {
@@ -123,11 +124,11 @@ test('D1: batch 按语句数计数，且把真实语句透传给底层（unwrap�
   );
   await worker.fetch(req(), { DB: db });
   assert.deepEqual(db.calls, [['batch', 2]]);
-  assert.equal(db.batchReceived[0].__sql, 'UPDATE x SET a=1'); // 收到的是真实语句
-  assert.equal(db.batchReceived[0].prepare, undefined); // 不是包装 Proxy
+  assert.equal(db.batchReceived[0].__sql, 'UPDATE x SET a=1'); // driver got the real statement
+  assert.equal(db.batchReceived[0].prepare, undefined);         // not the wrapping Proxy
 });
 
-test('D1: exec 与 withSession 内调用均计数', async () => {
+test('D1: exec and calls inside withSession are counted', async () => {
   const db = mockD1();
   const worker = withBillingGuard(
     { fetch: async (r, env) => {
@@ -145,14 +146,15 @@ test('D1: exec 与 withSession 内调用均计数', async () => {
   assert.ok(db.calls.some((c) => c[0] === 'exec'));
 });
 
-// ---------- 单请求上限：throw 模式 ----------
+// ---------- per-request limit: throw mode ----------
 
-test('D1: 超限后以 Promise rejection 抛 BillingGuardError，绝不同步 throw', async () => {
+test('D1: over-limit returns a rejected promise (BillingGuardError), never throws synchronously', async () => {
   const db = mockD1();
   const worker = withBillingGuard(
     { fetch: async (r, env) => {
         const errs = [];
-        // 业务侧既有模式：.catch(()=>{}) —— 若包装器同步 throw 会直接崩
+        // Common business pattern: .catch(() => {}) — would crash if the
+        // wrapper threw synchronously before .catch is attached
         await env.DB.prepare('SELECT 1').all().catch((e) => errs.push(e.name));
         await env.DB.prepare('SELECT 2').all().catch((e) => errs.push(e.name));
         let caught = null;
@@ -169,10 +171,10 @@ test('D1: 超限后以 Promise rejection 抛 BillingGuardError，绝不同步 th
   const body = JSON.parse(await res.text());
   assert.deepEqual(body.errs, []);
   assert.equal(body.caught, 'BillingGuardError');
-  assert.equal(db.calls.length, 2); // 第 3 次没打到底层
+  assert.equal(db.calls.length, 2); // the 3rd never reached the driver
 });
 
-test('BillingGuardError 携带 binding/kind/used/limit 信息', () => {
+test('BillingGuardError carries binding/kind/used/limit', () => {
   const e = new BillingGuardError({ binding: 'DB', kind: 'd1', used: 3, limit: 2 });
   assert.equal(e.name, 'BillingGuardError');
   assert.equal(e.binding, 'DB');
@@ -182,7 +184,7 @@ test('BillingGuardError 携带 binding/kind/used/limit 信息', () => {
   assert.ok(e.message.includes('cf-billing-guard'));
 });
 
-test('D1: batch 会把整批拦截（不做半量执行）', async () => {
+test('D1: batch is blocked as a whole (no partial execution)', async () => {
   const db = mockD1();
   const worker = withBillingGuard(
     { fetch: async (r, env) => {
@@ -199,20 +201,20 @@ test('D1: batch 会把整批拦截（不做半量执行）', async () => {
   );
   const res = await worker.fetch(req(), { DB: db });
   assert.equal(await res.text(), 'BillingGuardError');
-  assert.equal(db.calls.length, 1); // batch 整批未执行
+  assert.equal(db.calls.length, 1); // the whole batch was skipped
 });
 
-// ---------- 单请求上限：empty 模式 ----------
+// ---------- per-request limit: empty mode ----------
 
-test('D1: onExceed=empty 返回同构空结果', async () => {
+test('D1: onExceed=empty returns same-shaped neutral results', async () => {
   const db = mockD1();
   const worker = withBillingGuard(
     { fetch: async (r, env) => {
-        const a = await env.DB.prepare('SELECT 1').all();      // 真实（1/1）
-        const b = await env.DB.prepare('SELECT 2').all();      // 空
-        const c = await env.DB.prepare('SELECT 3').first();    // 空
-        const d = await env.DB.prepare('UPDATE 4').run();      // 空
-        const e = await env.DB.prepare('SELECT 5').raw();      // 空
+        const a = await env.DB.prepare('SELECT 1').all();   // real (1/1)
+        const b = await env.DB.prepare('SELECT 2').all();   // neutral
+        const c = await env.DB.prepare('SELECT 3').first(); // neutral
+        const d = await env.DB.prepare('UPDATE 4').run();   // neutral
+        const e = await env.DB.prepare('SELECT 5').raw();   // neutral
         return new Response(JSON.stringify({ a: a.results.length, b, c, d: d.success, e }));
       } },
     { d1: { maxCalls: 1, onExceed: 'empty' } }
@@ -229,17 +231,17 @@ test('D1: onExceed=empty 返回同构空结果', async () => {
 
 // ---------- KV ----------
 
-test('KV: get/put/delete/list 计数；超限 throw；empty 返回空语义结果', async () => {
+test('KV: get/put/delete/list counting; throw blocks; empty returns neutral results', async () => {
   const kv = mockKV();
   const worker = withBillingGuard(
     { fetch: async (r, env) => {
-        const v1 = await env.KV.get('k1'); // 真实
-        const v2 = await env.KV.get('k2'); // 空（limit=1, empty）
+        const v1 = await env.KV.get('k1'); // real
+        const v2 = await env.KV.get('k2'); // neutral (limit=1, empty)
         let err = null;
         try {
           await env.KV.put('k3', 'x');
         } catch (e) {
-          err = e.name; // empty 不抛 → undefined
+          err = e.name; // empty does not throw → undefined
         }
         const l = await env.KV.list();
         return new Response(JSON.stringify({ v1, v2, err: err || null, l }));
@@ -255,7 +257,7 @@ test('KV: get/put/delete/list 计数；超限 throw；empty 返回空语义结�
   assert.equal(kv.calls.length, 1);
 });
 
-test('KV: throw 模式超限抛 BillingGuardError', async () => {
+test('KV: throw mode rejects with BillingGuardError', async () => {
   const kv = mockKV();
   const worker = withBillingGuard(
     { fetch: async (r, env) => {
@@ -273,14 +275,14 @@ test('KV: throw 模式超限抛 BillingGuardError', async () => {
   assert.equal(await res.text(), 'BillingGuardError');
 });
 
-// ---------- 策略解析 / 回调 ----------
+// ---------- policy resolution / callbacks ----------
 
-test('bindings 按名覆盖优先级最高；非绑定 env 属性透传', async () => {
+test('bindings override has highest priority; non-binding env props pass through', async () => {
   const db = mockD1();
   const kv = mockKV();
   const worker = withBillingGuard(
     { fetch: async (r, env) => {
-        assert.equal(env.OTHER, 'x'); // 普通 env 属性原样可见
+        assert.equal(env.OTHER, 'x'); // plain env props stay visible
         assert.equal(typeof env.DB.prepare, 'function');
         await env.DB.prepare('SELECT 1').all();
         await env.DB.prepare('SELECT 2').all();
@@ -298,7 +300,7 @@ test('bindings 按名覆盖优先级最高；非绑定 env 属性透传', async 
   assert.equal(await res.text(), 'blocked');
 });
 
-test('count / onExceeded / onRequestEnd 回调触发', async () => {
+test('count / onExceeded / onRequestEnd callbacks fire', async () => {
   const db = mockD1();
   const counted = [];
   let exceeded = null;
@@ -324,9 +326,9 @@ test('count / onExceeded / onRequestEnd 回调触发', async () => {
   assert.equal(summary.bindings[0].blocked, 1);
 });
 
-// ---------- 请求隔离 / 幂等 ----------
+// ---------- request isolation / idempotency ----------
 
-test('计数按请求隔离：两个请求各自独立', async () => {
+test('counters are isolated per request', async () => {
   const db = mockD1();
   const seen = [];
   const worker = withBillingGuard(
@@ -340,35 +342,36 @@ test('计数按请求隔离：两个请求各自独立', async () => {
   );
   await worker.fetch(req(), { DB: db });
   await worker.fetch(req(), { DB: db });
-  // 每个请求：第 1 次成功、第 2 次被拦 → 都出现过拦截
+  // Each request: first call passes, second is blocked → both saw a block
   assert.equal(seen.length, 2);
-  assert.equal(db.calls.length, 2); // 每请求只放行 1 次
+  assert.equal(db.calls.length, 2); // one allowed call per request
 });
 
-test('重复包装幂等：instrumentEnv 两层不重复计数', async () => {
+test('double wrapping is idempotent: nested instrumentEnv does not double-count', async () => {
   const db = mockD1();
   const ledger = new Ledger({ d1: { maxCalls: 10 } });
   const env1 = instrumentEnv({ DB: db }, ledger);
   const env2 = instrumentEnv(env1, new Ledger({ d1: { maxCalls: 10 } }));
   await env2.DB.prepare('SELECT 1').all();
   await env2.DB.prepare('SELECT 2').all();
-  assert.equal(ledger.summary().bindings[0].used, 2); // 只有第一层在计数
+  assert.equal(ledger.summary().bindings[0].used, 2); // only the inner layer counts
 });
 
-// ---------- 业务降级集成（D1 失败 → 回退单账号） ----------
+// ---------- business degradation integration ----------
 
-test('集成：超限后业务降级路径原样生效（D1 失败 → 回退单账号）', async () => {
+test('integration: existing degradation paths keep working when the limit hits', async () => {
   const db = mockD1();
   const worker = withBillingGuard(
     { fetch: async (r, env) => {
-        // 复刻典型业务模式：查账号表，失败则回退单账号
+        // Typical business pattern: query an accounts table, fall back to a
+        // single account when the query fails
         const getAvailableAccounts = async () => {
           if (env && env.DB) {
             try {
               const { results } = await env.DB.prepare('SELECT username FROM accounts').all();
               if (results && results.length) return results;
             } catch (e) {
-              // D1 查询失败则回退单账号
+              // D1 query failed → fall back
             }
           }
           return env.DH_USERNAME ? [{ username: env.DH_USERNAME }] : [];
@@ -379,11 +382,12 @@ test('集成：超限后业务降级路径原样生效（D1 失败 → 回退单
             .run()
             .catch(() => {});
 
-        // limit=2：前两次 D1 调用放行，第 3 次（第二个 getAvailableAccounts）被拦
+        // limit=2: the first two D1 calls pass, the third (second
+        // getAvailableAccounts) is blocked
         const acc1 = await getAvailableAccounts(); // call 1
-        await markUsed('u'); // call 2
-        const acc2 = await getAvailableAccounts(); // call 3 → 被拦
-        await markUsed('u'); // 被拦，不抛
+        await markUsed('u');                       // call 2
+        const acc2 = await getAvailableAccounts(); // call 3 → blocked
+        await markUsed('u');                       // blocked, does not throw
         return new Response(JSON.stringify({ acc1: acc1.length, acc2: acc2.length }));
       } },
     { d1: { maxCalls: 2 } }
@@ -391,6 +395,6 @@ test('集成：超限后业务降级路径原样生效（D1 失败 → 回退单
 
   const res = await worker.fetch(req(), { DB: db, DH_USERNAME: 'fallback-user' });
   const body = JSON.parse(await res.text());
-  assert.equal(body.acc1, 2); // 正常走 D1
-  assert.equal(body.acc2, 1); // 被拦 → 回退单账号，业务无感
+  assert.equal(body.acc1, 2); // normal D1 path
+  assert.equal(body.acc2, 1); // blocked → single-account fallback, business unaware
 });

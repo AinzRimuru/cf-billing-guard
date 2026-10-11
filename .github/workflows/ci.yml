@@ -1,4 +1,4 @@
-# CI：push / PR 时跑全量测试（engines 声明 >=18，矩阵覆盖 18/20/22/24）
+# CI: run the full test suite on push / PR (engines >= 18; matrix 18/20/22/24)
 name: CI
 
 on:
