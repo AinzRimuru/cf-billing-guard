@@ -1,0 +1,42 @@
+{
+  "name": "cf-billing-guard",
+  "version": "1.0.0",
+  "description": "Cloudflare Workers 单请求 D1/KV 调用上限守卫 — 零侵入 Proxy 包装，防止失控请求打爆账单",
+  "license": "MIT",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "cf-billing-guard": "./cli.js"
+  },
+  "files": [
+    "index.js",
+    "ledger.js",
+    "d1.js",
+    "kv.js",
+    "cli.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/billing-guard.test.mjs test/cli.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "d1",
+    "kv",
+    "quota",
+    "rate-limit",
+    "per-request",
+    "billing",
+    "guard",
+    "zero-intrusion"
+  ]
+}
