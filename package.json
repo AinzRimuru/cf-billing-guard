@@ -27,6 +27,7 @@
     "kv.js",
     "cli.js",
     "README.md",
+    "README_zh.md",
     "LICENSE"
   ],
   "scripts": {

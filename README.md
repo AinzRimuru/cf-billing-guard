@@ -1,5 +1,7 @@
 # cf-billing-guard
 
+English | [简体中文](README_zh.md)
+
 [![CI](https://github.com/AinzRimuru/cf-billing-guard/actions/workflows/ci.yml/badge.svg)](https://github.com/AinzRimuru/cf-billing-guard/actions/workflows/ci.yml)
 
 Per-request call limiter for Cloudflare Workers D1 and KV bindings. Wraps `env` in a Proxy, counts every real D1/KV call within a request, and blocks anything past the limit — so a runaway loop, a recursion bug, or a hostile request can't burn through your Cloudflare bill.
