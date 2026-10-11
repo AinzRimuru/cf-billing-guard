@@ -47,7 +47,8 @@ export default withBillingGuard(worker, {
          └─ worker.fetch(request, 包装后的 env, ctx)   // 业务照常
 ```
 
-- 按方法签名探测绑定（`prepare+batch+exec` → D1，`get+put+getWithMetadata` → KV）；也可通过 `options.bindings` 显式指定白名单。
+- CLI 会从 wrangler 配置的 `d1_databases` / `kv_namespaces` 读出**显式白名单**（`bindings`）写进接线文件——只包装你声明过的绑定；R2、Durable Objects、Queues 等其它任何绑定永不被碰。未配置白名单时（手工接线）才退回按方法签名探测（`prepare+batch+exec` → D1，`get+put+getWithMetadata` → KV）。
+- 增删 D1/KV 绑定后，重新执行 `npx cf-billing-guard enable --force` 刷新白名单。
 - 包装按请求创建，计数精确且天然隔离——无跨请求状态，无 isolate 级近似。
 - 重复包装幂等（`Symbol.for('cf-billing-guard.wrapped')`）。
 
@@ -103,14 +104,14 @@ export default withBillingGuard(worker, {
 ```
 cf-billing-guard enable  [--entry <path>] [--out <path>] [--config <path>]
                          [--import <specifier>] [--d1 <n>] [--kv <n>]
-                         [--on-exceed throw|empty] [--force] [--dry-run]
+                         [--bindings <name,name>] [--on-exceed throw|empty] [--force] [--dry-run]
 cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
 ```
 
 ## 边界
 
 - 只管单请求次数——不做每日额度、不做 QPS。全局额度需要跨请求状态（Durable Objects），可将 Ledger 替换为 DO 代理实现。
-- 绑定按方法签名探测；极小概率误判时用 `bindings` 白名单显式指定。
+- 未配置 `bindings` 白名单时退回按方法签名探测（对真实 Cloudflare 绑定几乎不可能误判；用 `--bindings` 或 `bindings` 选项可显式固定名单）。
 - `exec()` 含多条语句仍计 1 次（Cloudflare 也按一次 API 调用计费）。
 - 未覆盖的方法默认透传不计数——包装不会破坏新 API。
 

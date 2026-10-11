@@ -29,12 +29,12 @@ function fixtureHost({ config = 'wrangler.jsonc' } = {}) {
   if (config.endsWith('.toml')) {
     fs.writeFileSync(
       path.join(dir, config),
-      `# demo worker\nname = "demo"\nmain = "src/worker.js"\ncompatibility_date = "2025-07-01"\n`
+      `# demo worker\nname = "demo"\nmain = "src/worker.js"\ncompatibility_date = "2025-07-01"\n\n[[d1_databases]]\nbinding = "DB"\ndatabase_name = "demo-db"\n`
     );
   } else if (config.endsWith('.jsonc') || config.endsWith('.json')) {
     fs.writeFileSync(
       path.join(dir, config),
-      `{\n  // top-level comment must be preserved\n  "name": "demo",\n  "main": "src/worker.js",\n  "compatibility_date": "2025-07-01"\n}\n`
+      `{\n  // top-level comment must be preserved\n  "name": "demo",\n  "main": "src/worker.js",\n  "compatibility_date": "2025-07-01",\n  "d1_databases": [{ "binding": "DB", "database_name": "demo-db" }],\n  "kv_namespaces": [{ "binding": "CACHE", "id": "x" }],\n  "r2_buckets": [{ "binding": "BUCKET", "bucket_name": "demo" }]\n}\n`
     );
   }
   return dir;
@@ -69,6 +69,9 @@ test('CLI enable: generates wrapper entry + surgically patches main (jsonc, comm
   assert.match(content, /withBillingGuard/);
   assert.match(content, /d1: \{ maxCalls: 100 \}/);
   assert.match(content, /kv: \{ maxCalls: 100 \}/);
+  // whitelist derived from the config's D1/KV bindings; R2 (BUCKET) excluded
+  assert.match(content, /bindings: \{ DB: \{\}, CACHE: \{\} \}/);
+  assert.ok(r.out.includes('binding whitelist (DB, CACHE)'), r.out);
 
   assert.equal(readMain(dir), 'src/billing-guard.main.js');
   const cfgText = fs.readFileSync(path.join(dir, 'wrangler.jsonc'), 'utf8');
@@ -134,6 +137,8 @@ test('CLI enable/disable: wrangler.toml support', () => {
   assert.equal(readMain(dir, 'wrangler.toml'), 'src/billing-guard.main.js');
   const toml = fs.readFileSync(path.join(dir, 'wrangler.toml'), 'utf8');
   assert.ok(toml.includes('# demo worker'), 'toml comment preserved');
+  const content = fs.readFileSync(path.join(dir, WRAPPER), 'utf8');
+  assert.match(content, /bindings: \{ DB: \{\} \}/); // [[d1_databases]] binding picked up
 
   const r2 = runCli(['disable'], dir);
   assert.equal(r2.code, 0, r2.out);
@@ -161,5 +166,30 @@ test('CLI disable: exits safely when nothing is wired', () => {
   const r = runCli(['disable'], dir);
   assert.equal(r.code, 0, r.out);
   assert.ok(r.out.includes('nothing to revert'), r.out);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('CLI enable: --bindings pins the whitelist manually (overrides config)', () => {
+  const dir = fixtureHost();
+  const r = runCli(['enable', '--bindings', 'DB,SPARE'], dir);
+  assert.equal(r.code, 0, r.out);
+  const content = fs.readFileSync(path.join(dir, WRAPPER), 'utf8');
+  assert.match(content, /bindings: \{ DB: \{\}, SPARE: \{\} \}/);
+  fs.rmSync(dir, { recursive: true, force: true });
+});
+
+test('CLI enable: no D1/KV bindings in config → no whitelist line, shape-detection fallback', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfbg-'));
+  fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'src', 'worker.js'), 'export default { async fetch() { return new Response("ok"); } };\n');
+  fs.writeFileSync(
+    path.join(dir, 'wrangler.jsonc'),
+    `{\n  "name": "demo",\n  "main": "src/worker.js",\n  "compatibility_date": "2025-07-01"\n}\n`
+  );
+  const r = runCli(['enable'], dir);
+  assert.equal(r.code, 0, r.out);
+  assert.ok(r.out.includes('falling back to shape detection'), r.out);
+  const content = fs.readFileSync(path.join(dir, WRAPPER), 'utf8');
+  assert.doesNotMatch(content, /bindings:/);
   fs.rmSync(dir, { recursive: true, force: true });
 });

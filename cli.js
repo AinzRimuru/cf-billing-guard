@@ -18,7 +18,8 @@
  * Usage:
  *   npx cf-billing-guard enable  [--entry <path>] [--out <path>] [--config <path>]
  *                                [--import <specifier>] [--d1 <n>] [--kv <n>]
- *                                [--on-exceed throw|empty] [--force] [--dry-run]
+ *                                [--bindings <name,name>] [--on-exceed throw|empty]
+ *                                [--force] [--dry-run]
  *   npx cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
  */
 
@@ -35,7 +36,7 @@ const PKG_NAME = 'cf-billing-guard';
 function parseArgs(argv) {
   const cmd = argv[0] && !argv[0].startsWith('--') ? argv[0] : 'enable';
   const args = { cmd, _: [] };
-  const flagsWithValue = new Set(['--entry', '--out', '--config', '--import', '--d1', '--kv', '--on-exceed']);
+  const flagsWithValue = new Set(['--entry', '--out', '--config', '--import', '--d1', '--kv', '--on-exceed', '--bindings']);
   for (let i = cmd === argv[0] ? 1 : 0; i < argv.length; i++) {
     const a = argv[i];
     if (flagsWithValue.has(a)) {
@@ -131,22 +132,59 @@ function stripJsonComments(text) {
   return out;
 }
 
-/** Read a config: returns { path, text, isToml, main }. */
+/** Read a config: returns { path, text, isToml, main, d1Names, kvNames }. */
 function readConfig(configPath) {
   const text = fs.readFileSync(configPath, 'utf8');
   const isToml = /\.toml$/i.test(configPath);
   let main;
+  let d1Names = [];
+  let kvNames = [];
   if (isToml) {
     const m = text.match(/^\s*main\s*=\s*(['"])(.*?)\1/m);
     main = m ? m[2] : undefined;
+    ({ d1: d1Names, kv: kvNames } = tomlBindingNames(text));
   } else {
+    let cfg;
     try {
-      main = JSON.parse(stripJsonComments(text)).main;
+      cfg = JSON.parse(stripJsonComments(text));
     } catch (e) {
       fail(`wrangler config is not valid JSON(C): ${configPath} (${e.message})`);
     }
+    main = cfg.main;
+    d1Names = bindingNamesOf(cfg.d1_databases);
+    kvNames = bindingNamesOf(cfg.kv_namespaces);
   }
-  return { path: configPath, text, isToml, main };
+  return { path: configPath, text, isToml, main, d1Names, kvNames };
+}
+
+/** binding names from a wrangler "*_databases" / "*_namespaces" array (JSON path). */
+function bindingNamesOf(arr) {
+  return Array.isArray(arr) ? arr.map((e) => e && e.binding).filter((n) => typeof n === 'string') : [];
+}
+
+/**
+ * binding names from [[d1_databases]] / [[kv_namespaces]] sections (TOML path).
+ * Minimal line-based scan: only `binding = "..."` inside those sections counts;
+ * entering any other section resets, so identically named keys elsewhere are ignored.
+ */
+function tomlBindingNames(text) {
+  const names = { d1: [], kv: [] };
+  let section = null;
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, ''); // strip trailing comment
+    const sec = line.match(/^\s*\[\[\s*(d1_databases|kv_namespaces)\s*\]\]/);
+    if (sec) {
+      section = sec[1];
+      continue;
+    }
+    if (/^\s*\[/.test(line)) {
+      section = null;
+      continue;
+    }
+    const b = line.match(/^\s*binding\s*=\s*["']([^"']+)["']/);
+    if (b && section) names[section === 'd1_databases' ? 'd1' : 'kv'].push(b[1]);
+  }
+  return names;
 }
 
 /** Replace the main line with a new value (that line only; jsonc/toml get a revert comment, plain json does not). Returns the new text. */
@@ -197,7 +235,10 @@ function cliCommand(cwd) {
   return `node ${rel}`;
 }
 
-function wrapperContent({ entryMark, entrySpec, importSrc, d1, kv, onExceed, revertCmd }) {
+function wrapperContent({ entryMark, entrySpec, importSrc, d1, kv, onExceed, whitelist, revertCmd }) {
+  const bindingsLine = whitelist && whitelist.length
+    ? `  bindings: { ${whitelist.map((n) => `${n}: {}`).join(', ')} }, // explicit whitelist — anything else is never wrapped\n`
+    : '';
   return `/**
  * cf-billing-guard wiring entry (auto-generated — tune limits below).
  * Enable: ${revertCmd.replace(' disable ', ' enable ')}    Revert: ${revertCmd}
@@ -210,7 +251,7 @@ export default withBillingGuard(worker, {
   defaults: { maxCalls: ${d1}, onExceed: '${onExceed}' },
   d1: { maxCalls: ${d1} }, // per-request D1 call limit
   kv: { maxCalls: ${kv} }, // per-request KV call limit
-});
+${bindingsLine}});
 `;
 }
 
@@ -274,6 +315,21 @@ function enable(args, cwd) {
   const d1 = Number(args.d1) > 0 ? Number(args.d1) : 100;
   const kv = Number(args.kv) > 0 ? Number(args.kv) : 100;
   const onExceed = args['on-exceed'] === 'empty' ? 'empty' : 'throw';
+  // Explicit binding whitelist: --bindings flag > names declared in the wrangler
+  // config (d1_databases / kv_namespaces). Only whitelisted bindings are wrapped —
+  // other binding kinds (R2, Durable Objects, Queues, ...) are never touched. No
+  // whitelist resolvable → fall back to shape detection at runtime.
+  let whitelist = null;
+  if (args.bindings) {
+    whitelist = args.bindings.split(',').map((s) => s.trim()).filter(Boolean);
+  } else {
+    whitelist = [...cfg.d1Names, ...cfg.kvNames];
+  }
+  if (whitelist.length) {
+    log(`binding whitelist (${whitelist.join(', ')}) — anything else is never wrapped`);
+  } else {
+    log('no D1/KV bindings found in config; falling back to shape detection (pass --bindings to pin names)');
+  }
   const cliCmd = cliCommand(cwd);
   const revertCmd = `${cliCmd} disable --out ${outRel}`;
 
@@ -286,6 +342,7 @@ function enable(args, cwd) {
       d1,
       kv,
       onExceed,
+      whitelist,
       revertCmd,
     })
   );

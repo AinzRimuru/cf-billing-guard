@@ -47,7 +47,8 @@ request ─▶ withBillingGuard(worker).fetch
              └─ worker.fetch(request, wrapped env, ctx)   // business as usual
 ```
 
-- Bindings are detected by shape (`prepare+batch+exec` → D1, `get+put+getWithMetadata` → KV). Set `options.bindings` for an explicit whitelist instead.
+- The CLI wires an explicit whitelist (`bindings`) derived from your wrangler config's `d1_databases` / `kv_namespaces` entries — only the bindings you declared are wrapped. R2, Durable Objects, Queues and any other binding kind are never touched. Without a whitelist (manual wiring), bindings are detected by shape (`prepare+batch+exec` → D1, `get+put+getWithMetadata` → KV) as a best-effort fallback.
+- After adding or removing D1/KV bindings, re-run `npx cf-billing-guard enable --force` to refresh the whitelist.
 - Wrappers are created per request, so counters are exact and isolated — no cross-request state, no isolate-level approximation.
 - Double wrapping is a no-op (`Symbol.for('cf-billing-guard.wrapped')`).
 
@@ -103,14 +104,14 @@ Wraps a Worker entry. `fetch` is required; `scheduled`, `queue`, `test`, `email`
 ```
 cf-billing-guard enable  [--entry <path>] [--out <path>] [--config <path>]
                          [--import <specifier>] [--d1 <n>] [--kv <n>]
-                         [--on-exceed throw|empty] [--force] [--dry-run]
+                         [--bindings <name,name>] [--on-exceed throw|empty] [--force] [--dry-run]
 cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
 ```
 
 ## Limitations
 
 - Per-request only — no daily quotas, no QPS. A global limit would need cross-request state (Durable Objects); the Ledger could be swapped for a DO proxy.
-- Bindings are detected by method shape; in the unlikely case of a false positive, set an explicit `bindings` whitelist.
+- Manual wiring without a `bindings` whitelist falls back to shape-based detection (false positives are near-impossible for real Cloudflare bindings; pass `--bindings` or set `bindings` to pin names explicitly).
 - `exec()` counts as 1 even with multiple statements (Cloudflare bills it as one API call).
 - Methods not covered above are passed through uncounted — wrapping never breaks new APIs.
 

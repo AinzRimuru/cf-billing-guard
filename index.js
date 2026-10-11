@@ -17,7 +17,11 @@
  *   defaults: { maxCalls?: number = 100, onExceed?: 'throw'|'empty' = 'throw' }
  *   d1:       same shape, overrides all D1 bindings
  *   kv:       same shape, overrides all KV bindings
- *   bindings: { [name]: same shape }  per-binding override (highest priority)
+ *   bindings: { [name]: same shape }  per-binding override (highest priority);
+ *             doubles as a whitelist — when set, only the listed names are
+ *             wrapped, so other binding kinds (R2, Durable Objects, Queues,
+ *             ...) are never touched. The CLI derives this list from the
+ *             wrangler config (d1_databases / kv_namespaces).
  *   count(info)        after every real call (metrics)
  *   onExceeded(info)   first blocked call per binding per request (alerting)
  *   onRequestEnd(summary)  usage summary when the request ends (logging)
@@ -30,6 +34,12 @@ import { wrapKV } from './kv.js';
 export { BillingGuardError } from './ledger.js';
 export { wrapD1 } from './d1.js';
 export { wrapKV } from './kv.js';
+/**
+ * Shape-based D1/KV detection is a best-effort fallback for manual wiring.
+ * Anything that matches neither shape is passed through untouched. Prefer the
+ * explicit `bindings` whitelist (the CLI generates it from the wrangler config)
+ * to guarantee other binding kinds are never inspected.
+ */
 
 /** Detect D1Database by shape (prepare/batch/exec). */
 function looksLikeD1(v) {

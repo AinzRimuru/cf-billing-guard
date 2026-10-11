@@ -326,6 +326,31 @@ test('count / onExceeded / onRequestEnd callbacks fire', async () => {
   assert.equal(summary.bindings[0].blocked, 1);
 });
 
+test('whitelist: only listed names are wrapped — unlisted KV-shaped bindings pass through untouched', async () => {
+  const cache = mockKV();
+  const otherKv = mockKV(); // e.g. an R2 bucket or any other binding that happens to look KV-ish
+  const counted = [];
+  const worker = withBillingGuard(
+    { fetch: async (r, env) => {
+        const a = await env.CACHE.get('a');                          // real (1/1)
+        let blocked = false;
+        try { await env.CACHE.get('b'); } catch (e) { blocked = true; } // over limit
+        const x1 = await env.OTHER_KV.get('x');                     // not whitelisted
+        const x2 = await env.OTHER_KV.get('y');                     // still untouched
+        return new Response(JSON.stringify({ a, blocked, x1, x2 }));
+      } },
+    { kv: { maxCalls: 1 }, bindings: { CACHE: {} }, count: (i) => counted.push(i.binding) }
+  );
+  const res = await worker.fetch(req(), { CACHE: cache, OTHER_KV: otherKv });
+  const body = JSON.parse(await res.text());
+  assert.equal(body.a, 'v:a');
+  assert.equal(body.blocked, true);      // CACHE hit its limit
+  assert.equal(body.x1, 'v:x');          // OTHER_KV unaffected
+  assert.equal(body.x2, 'v:y');
+  assert.equal(otherKv.calls.length, 2); // both calls reached the driver
+  assert.deepEqual(counted, ['CACHE']);  // only CACHE was counted
+});
+
 // ---------- request isolation / idempotency ----------
 
 test('counters are isolated per request', async () => {
