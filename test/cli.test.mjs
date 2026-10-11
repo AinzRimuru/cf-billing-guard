@@ -21,10 +21,13 @@ function runCli(args, cwd) {
   return { code: r.status, out: (r.stdout || '') + (r.stderr || '') };
 }
 
-/** Create a mock host project: wrangler config + src/worker.js */
+/** Create a mock host project: package.json + wrangler config + src/worker.js */
 function fixtureHost({ config = 'wrangler.jsonc' } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'cfbg-'));
   fs.mkdirSync(path.join(dir, 'src'), { recursive: true });
+  // Real wrangler projects always have a package.json; "type": "module" makes the
+  // generated wrapper parse as ESM on every Node version (no syntax-detection reliance)
+  fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ name: 'demo-worker', private: true, type: 'module' }, null, 2) + '\n');
   fs.writeFileSync(path.join(dir, 'src', 'worker.js'), 'export default { async fetch() { return new Response("ok"); } };\n');
   if (config.endsWith('.toml')) {
     fs.writeFileSync(
