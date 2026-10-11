@@ -1,0 +1,63 @@
+# 自动发布到 npm
+#
+# 触发：在 GitHub 上发布 Release（tag 需为 vX.Y.Z 或 X.Y.Z，与 package.json 一致）。
+# 流程：测试 → 校验 tag 与版本一致 → npm publish --provenance（带构建来源证明）。
+#
+# 前置（仓库设置一次）：
+#   1. npmjs.com → 头像 → Access Tokens → Generate New Token
+#      - Granular Access Token：Packages → Read and write
+#        （首次发布前包还不存在，先选 "All packages"，发布后可收紧为仅 cf-billing-guard）
+#      - 或 Classic Token → Automation 类型（跳过 2FA，适合 CI）
+#   2. GitHub 仓库 → Settings → Secrets and variables → Actions → New repository secret
+#      名称：NPM_TOKEN   值：上面的 token
+#
+# 若所用 token 类型不支持 provenance 而报错，去掉 Publish 步骤的
+# --provenance 参数即可，其余不受影响。
+
+name: Publish to npm
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+  id-token: write # npm provenance（OIDC 签发构建来源证明）
+
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Test
+        run: npm test
+
+      - name: 校验 Release tag 与 package.json 版本一致
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG="${{ github.event.release.tag_name }}"
+          echo "package.json=$PKG_VERSION  release tag=$TAG"
+          if [ "$TAG" != "v$PKG_VERSION" ] && [ "$TAG" != "$PKG_VERSION" ]; then
+            echo "::error::Release tag '$TAG' 与 package.json version '$PKG_VERSION' 不一致（期望 v$PKG_VERSION）"
+            exit 1
+          fi
+
+      - name: Publish
+        run: npm publish --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

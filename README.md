@@ -125,13 +125,19 @@ cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
 - `exec()` 含多条语句时仍记 1 次（Cloudflare 也按一次 API 调用计）。
 - 未覆盖的 D1/KV 方法（如新 API）默认**透传不计数**，不会因包装而损坏。
 
-## 开发
+## 开发与发布
 
 ```bash
 npm test    # 22 个用例：计数口径 / 两种拦截 / 回调 / 请求隔离 / 业务降级集成 / CLI enable·disable
-npm publish # 发布（无依赖、纯 ESM、Node >= 18）
 ```
 
+发布走 GitHub Actions（`.github/workflows/publish.yml`）：
+
+1. 改 `package.json` 的 `version` → 提交 → push；
+2. 在 GitHub 上创建 Release，tag 为 `vX.Y.Z`（与版本一致，workflow 会校验）；
+3. Release 发布后自动：测试 → 版本校验 → `npm publish --provenance`。
+
+CI（push / PR）在 Node 18/20/22/24 矩阵上跑全量测试。
 ## License
 
 MIT
