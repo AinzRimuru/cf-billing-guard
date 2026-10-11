@@ -18,7 +18,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "cf-billing-guard": "./cli.js"
+    "cf-billing-guard": "cli.js"
   },
   "files": [
     "index.js",
