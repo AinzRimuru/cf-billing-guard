@@ -121,7 +121,7 @@ cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
 npm test   # 22 个用例：计数口径、两种拦截模式、回调、请求隔离、业务降级、CLI
 ```
 
-发布由 GitHub Actions 在创建 GitHub Release 时自动完成（`.github/workflows/publish.yml`）；CI 在 Node 18/20/22/24 矩阵上运行测试。
+发布由 GitHub Actions 在创建 GitHub Release 时自动完成（`.github/workflows/publish.yml`），采用 [Trusted Publishing](https://docs.npmjs.com/trusted-publishers)（OIDC）——无需在 Secrets 里存长期 npm token，provenance 溯源凭证自动生成。CI 在 Node 18/20/22/24 矩阵上运行测试。
 
 ## 许可证
 

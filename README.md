@@ -121,7 +121,7 @@ cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
 npm test   # 22 tests: counting, both block modes, callbacks, isolation, degradation, CLI
 ```
 
-Releases are published to npm by GitHub Actions whenever a GitHub Release is created (`.github/workflows/publish.yml`); CI runs the test matrix on Node 18/20/22/24.
+Releases are published to npm by GitHub Actions whenever a GitHub Release is created (`.github/workflows/publish.yml`), using [trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) — no long-lived npm token stored as a secret; provenance attestations are generated automatically. CI runs the test matrix on Node 18/20/22/24.
 
 ## License
 

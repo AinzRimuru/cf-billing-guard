@@ -1,19 +1,29 @@
-# Publish to npm automatically when a GitHub Release is published.
+# Publish to npm via Trusted Publishing (OIDC) — no long-lived npm token needed.
 #
-# Trigger: publish a Release with tag vX.Y.Z (or X.Y.Z) matching package.json.
-# Flow:    install → test → verify tag matches version → npm publish --provenance.
+# Trigger: publish a GitHub Release with tag vX.Y.Z (or X.Y.Z) matching package.json.
+# Flow:    install → test → verify tag matches version → npm publish.
+#          Provenance attestations are generated automatically when publishing
+#          via trusted publishing from a public repository.
 #
-# One-time setup:
-#   1. npmjs.com → avatar → Access Tokens → Generate New Token
-#      - Granular Access Token: Packages → Read and write. The package does
-#        not exist before the first publish, so start with "All packages"
-#        and narrow it to cf-billing-guard afterwards; or
-#      - Classic Token → Automation type (bypasses 2FA, suits CI).
-#   2. GitHub repo → Settings → Secrets and variables → Actions → New
-#      repository secret: name NPM_TOKEN, value = the token above.
+# One-time setup (npm requires the package to EXIST before you can configure
+# a trusted publisher — unlike PyPI, there is no pre-registration):
+#   1. Make the package exist first, either by
+#      a) publishing v1.0.0 once from your machine (`npm login` + `npm publish`,
+#         2FA OTP), or
+#      b) publishing a placeholder with `npx setup-npm-trusted-publish
+#         cf-billing-guard` (creates a clearly-marked 0.0.0), or
+#      c) publishing once with a classic token workflow.
+#   2. npmjs.com → package page → Settings → "Trusted Publisher" →
+#      GitHub Actions → Organization or user: AinzRimuru, Repository:
+#      cf-billing-guard, Workflow filename: publish.yml (exact match,
+#      case-sensitive; environment optional).
+#   3. Optional hardening: Settings → Publishing access →
+#      "Require two-factor authentication and disallow tokens".
+#      Then delete the NPM_TOKEN secret here and revoke the npm token.
 #
-# If your token type does not support provenance, drop --provenance from the
-# Publish step; everything else is unaffected.
+# Requirements: npm CLI >= 11.5.1 (Node 24 bundles it), GitHub-hosted runners
+# only, `repository.url` in package.json must match this repo exactly.
+# Docs: https://docs.npmjs.com/trusted-publishers
 
 name: Publish to npm
 
@@ -23,7 +33,7 @@ on:
 
 permissions:
   contents: read
-  id-token: write # npm provenance (build attestation via OIDC)
+  id-token: write # OIDC token minting for trusted publishing
 
 concurrency:
   group: publish
@@ -38,7 +48,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          node-version: '24' # bundles npm >= 11.5.1, required for trusted publishing
           cache: npm
           registry-url: https://registry.npmjs.org
 
@@ -58,7 +68,7 @@ jobs:
             exit 1
           fi
 
+      # No NODE_AUTH_TOKEN: npm CLI detects the GitHub Actions OIDC environment
+      # and exchanges the short-lived id-token for publish credentials.
       - name: Publish
-        run: npm publish --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish
