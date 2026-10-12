@@ -280,6 +280,7 @@ export default withBillingGuard(worker, {
   defaults: { maxCalls: ${d1}, onExceed: '${onExceed}' },
   d1: { maxCalls: ${d1} }, // per-request D1 call limit
   kv: { maxCalls: ${kv} }, // per-request KV call limit
+  // other kinds — add as needed: r2 / queue / vectorize / analytics / ai / do: { maxCalls, onExceed }
 ${bindingsLine}});
 
 // Re-export named exports from the original entry (Durable Object classes, etc.).

@@ -54,13 +54,21 @@ export default withBillingGuard(worker, {
 
 ## 支持的服务
 
-内建适配器——默认生效，策略写在 `options.<kind>`：
+内建适配器——默认生效。限额配置在生成的 `billing-guard.main.js` 里：在 `d1`/`kv` 旁按类型各加一行。
 
 ```js
-withBillingGuard(worker, { r2: { maxCalls: 50 }, queue: { maxCalls: 100 } }); // 按类型限额
+// billing-guard.main.js（自动生成，可直接编辑）
+export default withBillingGuard(worker, {
+  defaults: { maxCalls: 100, onExceed: 'throw' },
+  d1: { maxCalls: 100 },  // 单请求 D1 调用上限
+  kv: { maxCalls: 100 },  // 单请求 KV 调用上限
+  r2: { maxCalls: 50 },   // ← 按需加类型
+  queue: { maxCalls: 100 },
+  bindings: { DB: {}, BUCKET: { maxCalls: 10 } }, // 按绑定名覆盖（优先级最高）
+});
 ```
 
-CLI 用户：直接编辑生成的 `billing-guard.main.js`——在 `d1`/`kv` 旁边加对应类型的一行。按绑定名覆盖（`bindings: { BUCKET: { maxCalls: 10 } }`）对所有类型同样有效。
+未单列的类型回落到 `defaults`。
 
 | kind | 计数 | `'empty'` 中立结果 |
 |---|---|---|

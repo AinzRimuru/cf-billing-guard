@@ -54,13 +54,21 @@ request ─▶ withBillingGuard(worker).fetch
 
 ## Supported services
 
-Built-in adapters — guarded by default, policy under `options.<kind>`:
+Built-in adapters — guarded by default. Limits are configured in the generated `billing-guard.main.js`: one line per kind next to `d1`/`kv`.
 
 ```js
-withBillingGuard(worker, { r2: { maxCalls: 50 }, queue: { maxCalls: 100 } }); // per-kind limits
+// billing-guard.main.js (generated — edit to taste)
+export default withBillingGuard(worker, {
+  defaults: { maxCalls: 100, onExceed: 'throw' },
+  d1: { maxCalls: 100 },  // per-request D1 call limit
+  kv: { maxCalls: 100 },  // per-request KV call limit
+  r2: { maxCalls: 50 },   // ← add kinds as needed
+  queue: { maxCalls: 100 },
+  bindings: { DB: {}, BUCKET: { maxCalls: 10 } }, // per-binding override (highest priority)
+});
 ```
 
-CLI users: edit the generated `billing-guard.main.js` — add the kind line next to `d1`/`kv`. Per-binding overrides (`bindings: { BUCKET: { maxCalls: 10 } }`) work for every kind too.
+Kinds without their own line fall back to `defaults`.
 
 | kind | counts | `'empty'` neutral |
 |---|---|---|
