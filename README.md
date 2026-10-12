@@ -68,6 +68,8 @@ Built-in adapters — guarded by default, policy under `options.<kind>`:
 | `do` | stub `fetch` / RPC 1 each (via `env.<name>.get(...)`) | `undefined` |
 
 Anything else: `observe: true` for counting-only, or `defineAdapter` for full support. Deliberately not covered: Hyperdrive (no per-call billing), Cache API (free, not env-bound), service bindings (unreliable to detect). The CLI whitelist picks up all services above from your wrangler config.
+
+**Testing status**: only `d1` and `kv` have been verified against the live Cloudflare platform (production use). The adapters for `r2`, `queue`, `vectorize`, `analytics`, `ai` and `do` are implemented from the documented API shapes and covered by mock tests, but have **not** been exercised against live bindings — if a real binding's shape differs from what detection expects, it passes through unguarded (never broken). Mismatch reports and patches are welcome.
 ## Blocking semantics (`onExceed`)
 
 Blocked calls never throw synchronously — they surface as a rejected promise or a neutral result, so chained `.catch(() => {})` and try/catch fallbacks keep working.
@@ -137,6 +139,13 @@ cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
 - Manual wiring without a `bindings` whitelist falls back to shape-based detection (false positives are near-impossible for real Cloudflare bindings; pass `--bindings` or set `bindings` to pin names explicitly).
 - `exec()` counts as 1 even with multiple statements (Cloudflare bills it as one API call).
 - Methods not covered are passed through uncounted — wrapping never breaks new APIs.
+
+## Disclaimer
+
+- Only `d1` and `kv` are verified against the live Cloudflare platform; every other service adapter is mock-tested only. Behavior on real runtimes may differ.
+- This library is a best-effort billing guard, not a guarantee: binding kinds it cannot detect pass through uncounted, and blocking a call prevents further usage but does not refund or cap charges already incurred.
+- Not affiliated with, sponsored by, or endorsed by Cloudflare. "Cloudflare", "Workers", "D1", "R2", "Durable Objects" and related marks belong to their respective owners.
+- Provided as-is under the MIT license. The authors accept no liability for any overage, outage, data loss or other damage arising from the use of this library.
 
 ## License
 

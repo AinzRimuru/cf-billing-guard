@@ -68,6 +68,8 @@ export default withBillingGuard(worker, {
 | `do` | stub 的 `fetch` / RPC 各 1 次（经 `env.<name>.get(...)`） | `undefined` |
 
 其余服务：`observe: true` 仅计数，或 `defineAdapter` 升为完整支持。有意不覆盖：Hyperdrive（无按次计费）、Cache API（免费且不走 env）、Service bindings（无法可靠探测）。CLI 白名单会从 wrangler 配置自动提取上表全部服务的绑定名。
+
+**测试状态**：仅 `d1` 与 `kv` 在真实 Cloudflare 平台上验证过（生产使用中）。`r2`、`queue`、`vectorize`、`analytics`、`ai`、`do` 的适配器按公开 API 形状实现并通过 mock 测试，但**未在真实绑定上运行过**——若真实绑定的形状与探测预期不符，该绑定会被原样透传（不会损坏，只是不受保护）。欢迎报告不匹配并提交补丁。
 ## 拦截语义（`onExceed`）
 
 被拦截的调用绝不同步 throw——一律以 rejected Promise 或空结果呈现，链式的 `.catch(() => {})` 和 try/catch 降级路径照常工作。
@@ -136,6 +138,13 @@ cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
 - 未配置 `bindings` 白名单时退回按方法签名探测（对真实 Cloudflare 绑定几乎不可能误判；用 `--bindings` 或 `bindings` 选项可显式固定名单）。
 - `exec()` 含多条语句仍计 1 次（Cloudflare 也按一次 API 调用计费）。
 - 未覆盖的方法默认透传不计数——包装不会破坏新 API。
+
+## 免责声明
+
+- 仅 `d1` 与 `kv` 经真实 Cloudflare 平台验证，其余服务适配器仅通过 mock 测试，在真实运行时上的表现可能与预期不同。
+- 本库是尽力而为（best-effort）的账单防护，而非保证：无法探测的绑定类型不被计数；拦截调用可阻止后续用量，但不追回、也不封顶已产生的费用。
+- 本库与 Cloudflare 无隶属、赞助或背书关系。"Cloudflare"、"Workers"、"D1"、"R2"、"Durable Objects" 等名称及商标归其各自所有者。
+- 本库按 MIT 许可证原样提供，作者不对因使用本库产生的任何超额费用、服务中断、数据丢失或其他损失承担责任。
 
 ## 许可证
 
