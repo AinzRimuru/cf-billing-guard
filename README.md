@@ -96,6 +96,7 @@ Wraps a Worker entry. `fetch` is required; `scheduled`, `queue`, `test`, `email`
 ### Other exports
 
 - `instrumentEnv(env, ledger)` — for custom entries or tests.
+- `withBillingGuardDO(DOClass, options?)` — wrap a Durable Object class. The runtime instantiates exported DO classes with the **raw** env, which the worker-level wrapper never sees; this wrapper instruments the constructor's env (bindings captured as `this.db = env.DB` are counted too) and gives every inbound `fetch()` / `alarm()` a fresh budget.
 - `wrapD1(db, ledger, name)` / `wrapKV(ns, ledger, name)` — wrap a binding directly.
 - `Ledger`, `BillingGuardError` — `error.binding / kind / used / limit` for upstream handling.
 
@@ -111,6 +112,7 @@ cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
 ## Limitations
 
 - Per-request only — no daily quotas, no QPS. A global limit would need cross-request state (Durable Objects); the Ledger could be swapped for a DO proxy.
+- Durable Objects: `constructor(ctx, env)` receives the raw env, outside the worker-level wrapper — wrap each class with `withBillingGuardDO`. The CLI-generated wrapper re-exports your entry's named exports unchanged (so DO bindings keep working), but it cannot detect DO classes automatically. Class-RPC methods other than `fetch`/`alarm`, and callbacks running after a response is returned (e.g. WebSocket message handlers), continue on the previous call's budget.
 - Manual wiring without a `bindings` whitelist falls back to shape-based detection (false positives are near-impossible for real Cloudflare bindings; pass `--bindings` or set `bindings` to pin names explicitly).
 - `exec()` counts as 1 even with multiple statements (Cloudflare bills it as one API call).
 - Methods not covered above are passed through uncounted — wrapping never breaks new APIs.

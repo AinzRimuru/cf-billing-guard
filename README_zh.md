@@ -96,6 +96,7 @@ export default withBillingGuard(worker, {
 ### 其余导出
 
 - `instrumentEnv(env, ledger)`——用于自建入口或测试。
+- `withBillingGuardDO(DOClass, options?)`——包装 Durable Object 类。runtime 实例化导出的 DO 类时给的是**原始 env**，Worker 级包装看不到；此包装器会接管构造函数的 env（构造时捕获的 `this.db = env.DB` 也会被计数），且每次入站 `fetch()` / `alarm()` 独立配额。
 - `wrapD1(db, ledger, name)` / `wrapKV(ns, ledger, name)`——直接包装单个绑定。
 - `Ledger`、`BillingGuardError`——`error.binding / kind / used / limit` 可供上层识别。
 
@@ -111,6 +112,7 @@ cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
 ## 边界
 
 - 只管单请求次数——不做每日额度、不做 QPS。全局额度需要跨请求状态（Durable Objects），可将 Ledger 替换为 DO 代理实现。
+- Durable Objects：`constructor(ctx, env)` 拿到的是原始 env，在 Worker 级包装之外——需用 `withBillingGuardDO` 逐类包装。CLI 生成的包装文件会原样转发原入口的命名导出（DO 绑定不受影响），但无法自动识别 DO 类。除 `fetch`/`alarm` 外的 class-RPC 方法、以及响应返回后才执行的回调（如 WebSocket 消息处理）沿用上一个调用的配额。
 - 未配置 `bindings` 白名单时退回按方法签名探测（对真实 Cloudflare 绑定几乎不可能误判；用 `--bindings` 或 `bindings` 选项可显式固定名单）。
 - `exec()` 含多条语句仍计 1 次（Cloudflare 也按一次 API 调用计费）。
 - 未覆盖的方法默认透传不计数——包装不会破坏新 API。

@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { withBillingGuard, instrumentEnv, BillingGuardError } from '../index.js';
+import { withBillingGuard, withBillingGuardDO, instrumentEnv, BillingGuardError } from '../index.js';
 import { Ledger } from '../ledger.js';
 
 // ---------- mocks ----------
@@ -422,4 +422,50 @@ test('integration: existing degradation paths keep working when the limit hits',
   const body = JSON.parse(await res.text());
   assert.equal(body.acc1, 2); // normal D1 path
   assert.equal(body.acc2, 1); // blocked → single-account fallback, business unaware
+});
+
+// ---------- Durable Objects ----------
+
+test('withBillingGuardDO: constructor env is instrumented; constructor-captured bindings count', async () => {
+  const db = mockD1();
+  class FakeDO {
+    constructor(ctx, env) {
+      this.env = env;
+      this.db = env.DB; // captured at construction — must still be counted
+    }
+    async fetch(r) {
+      await this.db.prepare('SELECT 1').all();       // via captured binding
+      await this.env.DB.prepare('SELECT 2').all();   // via env
+      return new Response('ok');
+    }
+  }
+  const Guarded = withBillingGuardDO(FakeDO, { d1: { maxCalls: 100 } });
+  const inst = new Guarded({}, { DB: db });
+  await inst.fetch({});
+  assert.equal(db.calls.length, 2); // both counted, raw env never reached directly
+});
+
+test('withBillingGuardDO: each inbound fetch()/alarm() starts from a fresh budget', async () => {
+  const db = mockD1();
+  class FakeDO {
+    constructor(ctx, env) { this.env = env; }
+    async fetch(r) {
+      await this.env.DB.prepare('a').all();
+      let blocked = false;
+      try { await this.env.DB.prepare('b').all(); } catch (e) { blocked = e instanceof BillingGuardError; }
+      return new Response(String(blocked));
+    }
+    async alarm() { await this.env.DB.prepare('c').all(); }
+  }
+  const Guarded = withBillingGuardDO(FakeDO, { d1: { maxCalls: 1 } });
+
+  const inst = new Guarded({}, { DB: db });
+  // call 1: second query blocked (budget = 1)
+  assert.equal(await (await inst.fetch({})).text(), 'true');
+  // call 2: budget reset → first passes, second blocked
+  assert.equal(await (await inst.fetch({})).text(), 'true');
+  // alarm(): its own budget
+  await inst.alarm();
+  await inst.alarm();
+  assert.equal(db.calls.filter((c) => c[0] === 'all').length, 4); // 1 pass per fetch ×2, 1 per alarm ×2
 });

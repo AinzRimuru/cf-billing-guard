@@ -196,3 +196,18 @@ test('CLI enable: no D1/KV bindings in config → no whitelist line, shape-detec
   assert.doesNotMatch(content, /bindings:/);
   fs.rmSync(dir, { recursive: true, force: true });
 });
+
+test('CLI enable: named exports (e.g. Durable Object classes) are re-exported by the wrapper', async () => {
+  const dir = fixtureHost();
+  fs.writeFileSync(
+    path.join(dir, 'src', 'worker.js'),
+    'export default { async fetch() { return new Response("ok"); } };\nexport class MyDO { constructor(ctx, env) { this.env = env; } }\nexport const VERSION = 1;\n'
+  );
+  const r = runCli(['enable'], dir);
+  assert.equal(r.code, 0, r.out);
+  const mod = await import(pathToFileURL(path.join(dir, WRAPPER)).href);
+  assert.equal(typeof mod.default.fetch, 'function'); // wrapped default
+  assert.equal(typeof mod.MyDO, 'function');          // named class re-exported
+  assert.equal(mod.VERSION, 1);                       // named const re-exported
+  fs.rmSync(dir, { recursive: true, force: true });
+});

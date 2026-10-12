@@ -137,6 +137,11 @@ export class Ledger {
     });
   }
 
+  /** Drop all counters (used by withBillingGuardDO to give each inbound DO call a fresh budget). */
+  reset() {
+    this.slots = new Map();
+  }
+
   /** Usage summary at end of request (onRequestEnd callback / tests). */
   summary() {
     return {

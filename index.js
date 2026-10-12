@@ -82,6 +82,15 @@ export function instrumentEnv(env, ledger) {
   });
 }
 
+/** Fire options.onRequestEnd if configured; never throws. */
+function reportRequestEnd(options, ledger) {
+  if (typeof options.onRequestEnd === 'function') {
+    try {
+      options.onRequestEnd(ledger.summary());
+    } catch (e) {}
+  }
+}
+
 /** Wrap a Worker entry. */
 export function withBillingGuard(worker, options = {}) {
   const wrapped = {
@@ -91,11 +100,7 @@ export function withBillingGuard(worker, options = {}) {
       try {
         return await worker.fetch(request, env2, ctx);
       } finally {
-        if (typeof options.onRequestEnd === 'function') {
-          try {
-            options.onRequestEnd(ledger.summary());
-          } catch (e) {}
-        }
+        reportRequestEnd(options, ledger);
       }
     },
   };
@@ -103,8 +108,50 @@ export function withBillingGuard(worker, options = {}) {
   for (const name of ['scheduled', 'queue', 'test', 'email', 'tail']) {
     const h = worker[name];
     if (typeof h === 'function') {
-      wrapped[name] = (first, env, ...rest) => h(first, instrumentEnv(env, new Ledger(options)), ...rest);
+      wrapped[name] = (first, env, ...rest) => {
+        const ledger = new Ledger(options);
+        try {
+          return h(first, instrumentEnv(env, ledger), ...rest);
+        } finally {
+          reportRequestEnd(options, ledger);
+        }
+      };
     }
   }
   return wrapped;
+}
+
+/**
+ * Wrap a Durable Object class so its constructor receives an instrumented env.
+ *
+ * The runtime instantiates exported DO classes with the raw env — the worker-level
+ * wrapper never sees it — so D1/KV calls inside a DO escape counting unless the
+ * class is wrapped here. One shared ledger per DO instance; every inbound
+ * fetch()/alarm() starts from a fresh budget (ledger reset). Bindings captured
+ * in the constructor (this.db = env.DB) are instrumented as well.
+ *
+ * Not covered: class-RPC methods other than fetch/alarm, and callbacks that run
+ * after a fetch() response is returned (e.g. WebSocket message handlers) —
+ * those continue on the previous call's budget.
+ */
+export function withBillingGuardDO(DOClass, options = {}) {
+  const ledger = new Ledger(options);
+  const guarded = class extends DOClass {
+    constructor(ctx, env) {
+      super(ctx, instrumentEnv(env, ledger));
+    }
+  };
+  for (const name of ['fetch', 'alarm']) {
+    const orig = DOClass.prototype[name];
+    if (typeof orig !== 'function') continue;
+    guarded.prototype[name] = async function (...args) {
+      ledger.reset(); // fresh per-call budget
+      try {
+        return await orig.apply(this, args);
+      } finally {
+        reportRequestEnd(options, ledger);
+      }
+    };
+  }
+  return guarded;
 }

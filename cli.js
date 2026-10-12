@@ -252,6 +252,11 @@ export default withBillingGuard(worker, {
   d1: { maxCalls: ${d1} }, // per-request D1 call limit
   kv: { maxCalls: ${kv} }, // per-request KV call limit
 ${bindingsLine}});
+
+// Re-export named exports from the original entry (Durable Object classes, etc.).
+// Note: re-exported DO classes still receive the RAW env from the runtime —
+// wrap them with withBillingGuardDO(MyDO, options) if they use D1/KV.
+export * from '${entrySpec}';
 `;
 }
 
