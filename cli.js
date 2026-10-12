@@ -132,17 +132,16 @@ function stripJsonComments(text) {
   return out;
 }
 
-/** Read a config: returns { path, text, isToml, main, d1Names, kvNames }. */
+/** Read a config: returns { path, text, isToml, main, bindingNames }. */
 function readConfig(configPath) {
   const text = fs.readFileSync(configPath, 'utf8');
   const isToml = /\.toml$/i.test(configPath);
   let main;
-  let d1Names = [];
-  let kvNames = [];
+  let bindingNames = [];
   if (isToml) {
     const m = text.match(/^\s*main\s*=\s*(['"])(.*?)\1/m);
     main = m ? m[2] : undefined;
-    ({ d1: d1Names, kv: kvNames } = tomlBindingNames(text));
+    bindingNames = tomlBindingNames(text);
   } else {
     let cfg;
     try {
@@ -151,38 +150,68 @@ function readConfig(configPath) {
       fail(`wrangler config is not valid JSON(C): ${configPath} (${e.message})`);
     }
     main = cfg.main;
-    d1Names = bindingNamesOf(cfg.d1_databases);
-    kvNames = bindingNamesOf(cfg.kv_namespaces);
+    bindingNames = jsonBindingNames(cfg);
   }
-  return { path: configPath, text, isToml, main, d1Names, kvNames };
-}
-
-/** binding names from a wrangler "*_databases" / "*_namespaces" array (JSON path). */
-function bindingNamesOf(arr) {
-  return Array.isArray(arr) ? arr.map((e) => e && e.binding).filter((n) => typeof n === 'string') : [];
+  return { path: configPath, text, isToml, main, bindingNames };
 }
 
 /**
- * binding names from [[d1_databases]] / [[kv_namespaces]] sections (TOML path).
- * Minimal line-based scan: only `binding = "..."` inside those sections counts;
- * entering any other section resets, so identically named keys elsewhere are ignored.
+ * Binding names for every guarded service declared in a wrangler JSON(C) config.
+ * Covered: d1_databases, kv_namespaces, r2_buckets, vectorize,
+ * analytics_engine_datasets, workflows, hyperdrive, queues.producers,
+ * ai.binding, durable_objects.bindings[].name.
  */
+function jsonBindingNames(cfg) {
+  const names = [];
+  const pushArr = (arr, key = 'binding') => {
+    if (!Array.isArray(arr)) return;
+    for (const e of arr) if (e && typeof e[key] === 'string') names.push(e[key]);
+  };
+  pushArr(cfg.d1_databases);
+  pushArr(cfg.kv_namespaces);
+  pushArr(cfg.r2_buckets);
+  pushArr(cfg.vectorize);
+  pushArr(cfg.analytics_engine_datasets);
+  pushArr(cfg.workflows);
+  pushArr(cfg.hyperdrive);
+  pushArr(cfg.queues && cfg.queues.producers);
+  if (cfg.ai && typeof cfg.ai.binding === 'string') names.push(cfg.ai.binding);
+  pushArr(cfg.durable_objects && cfg.durable_objects.bindings, 'name');
+  return names;
+}
+
+/**
+ * Binding names from TOML sections. Minimal line-based scan: section headers
+ * ([[array-of-tables]] or [table]) switch context; only the mapped key inside
+ * a mapped section counts, so identically named keys elsewhere are ignored.
+ */
+const TOML_BINDING_SECTIONS = {
+  d1_databases: 'binding',
+  kv_namespaces: 'binding',
+  r2_buckets: 'binding',
+  vectorize: 'binding',
+  analytics_engine_datasets: 'binding',
+  workflows: 'binding',
+  hyperdrive: 'binding',
+  'queues.producers': 'binding',
+  'durable_objects.bindings': 'name',
+  ai: 'binding',
+};
+
 function tomlBindingNames(text) {
-  const names = { d1: [], kv: [] };
+  const names = [];
   let section = null;
   for (const raw of text.split(/\r?\n/)) {
     const line = raw.replace(/#.*$/, ''); // strip trailing comment
-    const sec = line.match(/^\s*\[\[\s*(d1_databases|kv_namespaces)\s*\]\]/);
+    const sec = line.match(/^\s*\[\[?\s*([^\]]+?)\s*\]\]?\s*$/);
     if (sec) {
       section = sec[1];
       continue;
     }
-    if (/^\s*\[/.test(line)) {
-      section = null;
-      continue;
-    }
-    const b = line.match(/^\s*binding\s*=\s*["']([^"']+)["']/);
-    if (b && section) names[section === 'd1_databases' ? 'd1' : 'kv'].push(b[1]);
+    const kv = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*["']([^"']+)["']/);
+    if (!kv || !section) continue;
+    const wanted = TOML_BINDING_SECTIONS[section];
+    if (wanted && kv[1] === wanted) names.push(kv[2]);
   }
   return names;
 }
@@ -321,19 +350,19 @@ function enable(args, cwd) {
   const kv = Number(args.kv) > 0 ? Number(args.kv) : 100;
   const onExceed = args['on-exceed'] === 'empty' ? 'empty' : 'throw';
   // Explicit binding whitelist: --bindings flag > names declared in the wrangler
-  // config (d1_databases / kv_namespaces). Only whitelisted bindings are wrapped —
-  // other binding kinds (R2, Durable Objects, Queues, ...) are never touched. No
-  // whitelist resolvable → fall back to shape detection at runtime.
+  // config (all guarded services: d1/kv/r2/queue/vectorize/analytics/ai/do).
+  // Only whitelisted bindings are wrapped; anything else is never touched.
+  // No whitelist resolvable → fall back to shape detection at runtime.
   let whitelist = null;
   if (args.bindings) {
     whitelist = args.bindings.split(',').map((s) => s.trim()).filter(Boolean);
   } else {
-    whitelist = [...cfg.d1Names, ...cfg.kvNames];
+    whitelist = cfg.bindingNames;
   }
   if (whitelist.length) {
     log(`binding whitelist (${whitelist.join(', ')}) — anything else is never wrapped`);
   } else {
-    log('no D1/KV bindings found in config; falling back to shape detection (pass --bindings to pin names)');
+    log('no guarded bindings found in config; falling back to shape detection (pass --bindings to pin names)');
   }
   const cliCmd = cliCommand(cwd);
   const revertCmd = `${cliCmd} disable --out ${outRel}`;

@@ -52,6 +52,22 @@ export default withBillingGuard(worker, {
 - 包装按请求创建，计数精确且天然隔离——无跨请求状态，无 isolate 级近似。
 - 重复包装幂等（`Symbol.for('cf-billing-guard.wrapped')`）。
 
+## 支持的服务
+
+内建适配器——默认生效，策略写在 `options.<kind>`：
+
+| kind | 计数 | `'empty'` 中立结果 |
+|---|---|---|
+| `d1` | 终结方法 1 次；`batch` N 次；`exec` 1 次 | 同构空结果 |
+| `kv` | `get / getWithMetadata / put / delete / list` | `null` / 空列表 |
+| `r2` | `get / head / put / delete / list` | `null` / `{objects:[]}` |
+| `queue` | `send` 1 条；`sendBatch` N 条（整批原子） | 丢弃（`undefined`） |
+| `vectorize` | `query / getByIds / deleteByIds / describe` 1 次；`insert / upsert` 按向量数 | 空查询结果 |
+| `analytics` | `writeDataPoint` | `undefined` |
+| `ai` | `run` | `null` |
+| `do` | stub 的 `fetch` / RPC 各 1 次（经 `env.<name>.get(...)`） | `undefined` |
+
+其余服务：`observe: true` 仅计数，或 `defineAdapter` 升为完整支持。有意不覆盖：Hyperdrive（无按次计费）、Cache API（免费且不走 env）、Service bindings（无法可靠探测）。CLI 白名单会从 wrangler 配置自动提取上表全部服务的绑定名。
 ## 拦截语义（`onExceed`）
 
 被拦截的调用绝不同步 throw——一律以 rejected Promise 或空结果呈现，链式的 `.catch(() => {})` 和 try/catch 降级路径照常工作。

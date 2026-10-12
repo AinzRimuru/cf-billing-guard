@@ -25,6 +25,8 @@
     "ledger.js",
     "d1.js",
     "kv.js",
+    "adapter.js",
+    "services.js",
     "cli.js",
     "README.md",
     "README_zh.md",

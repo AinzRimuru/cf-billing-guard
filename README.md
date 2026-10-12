@@ -52,6 +52,22 @@ request ─▶ withBillingGuard(worker).fetch
 - Wrappers are created per request, so counters are exact and isolated — no cross-request state, no isolate-level approximation.
 - Double wrapping is a no-op (`Symbol.for('cf-billing-guard.wrapped')`).
 
+## Supported services
+
+Built-in adapters — guarded by default, policy under `options.<kind>`:
+
+| kind | counts | `'empty'` neutral |
+|---|---|---|
+| `d1` | terminal methods 1; `batch` N; `exec` 1 | same-shaped empty results |
+| `kv` | `get / getWithMetadata / put / delete / list` | `null` / empty list |
+| `r2` | `get / head / put / delete / list` | `null` / `{objects:[]}` |
+| `queue` | `send` 1; `sendBatch` N (all-or-nothing) | dropped (`undefined`) |
+| `vectorize` | `query / getByIds / deleteByIds / describe` 1; `insert / upsert` N | empty query result |
+| `analytics` | `writeDataPoint` | `undefined` |
+| `ai` | `run` | `null` |
+| `do` | stub `fetch` / RPC 1 each (via `env.<name>.get(...)`) | `undefined` |
+
+Anything else: `observe: true` for counting-only, or `defineAdapter` for full support. Deliberately not covered: Hyperdrive (no per-call billing), Cache API (free, not env-bound), service bindings (unreliable to detect). The CLI whitelist picks up all services above from your wrangler config.
 ## Blocking semantics (`onExceed`)
 
 Blocked calls never throw synchronously — they surface as a rejected promise or a neutral result, so chained `.catch(() => {})` and try/catch fallbacks keep working.

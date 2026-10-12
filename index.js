@@ -35,10 +35,13 @@
 import { Ledger } from './ledger.js';
 import { wrapD1, WRAPPED } from './d1.js';
 import { wrapKV } from './kv.js';
+import { SERVICE_ADAPTERS } from './services.js';
 
 export { BillingGuardError } from './ledger.js';
 export { wrapD1 } from './d1.js';
 export { wrapKV } from './kv.js';
+export { defineAdapter } from './adapter.js';
+export { r2Adapter, queueAdapter, vectorizeAdapter, analyticsAdapter, aiAdapter, doAdapter } from './services.js';
 
 /** Detect D1Database by shape (prepare/batch/exec). */
 function looksLikeD1(v) {
@@ -61,12 +64,14 @@ function looksLikeKV(v) {
 }
 
 /**
- * Built-in adapters. D1 and KV are just two entries in the registry — custom
- * adapters registered via options.adapters are matched first and can override.
+ * Built-in adapters, in matching order. D1/KV plus the shipped service
+ * adapters (r2, queue, vectorize, analytics, ai, do). Custom adapters
+ * registered via options.adapters are matched first and can override any.
  */
 const BUILTIN_ADAPTERS = [
   { kind: 'd1', detect: looksLikeD1, wrap: wrapD1 },
   { kind: 'kv', detect: looksLikeKV, wrap: wrapKV },
+  ...SERVICE_ADAPTERS,
 ];
 
 /** Normalize + validate custom adapters; user adapters take precedence over built-ins. */
@@ -87,60 +92,6 @@ function buildAdapters(custom) {
   return [...list, ...BUILTIN_ADAPTERS];
 }
 
-/**
- * Define a binding adapter declaratively: detect by shape, count the listed
- * methods (1 call each), neutralize on 'empty'. Returns an adapter suitable
- * for options.adapters.
- *
- *   const r2 = defineAdapter({
- *     detect: (v) => typeof v.head === 'function' && typeof v.list === 'function',
- *     methods: ['get', 'put', 'head', 'delete', 'list'],
- *     neutral: (method) => (method === 'get' || method === 'head' ? null : method === 'list' ? { objects: [] } : undefined),
- *   });
- *   withBillingGuard(worker, { adapters: { r2 }, r2: { maxCalls: 50 } });
- *
- * @param {object} spec
- * @param {string} [spec.kind] adapter kind (defaults to the key used in options.adapters)
- * @param {(v: object) => boolean} spec.detect shape detection
- * @param {string[]} spec.methods the counting surface
- * @param {(method: string, args: any[]) => any} [spec.neutral] result returned when over limit in 'empty' mode
- * @param {(args: any[]) => object} [spec.detail] extra info for the count callback
- */
-export function defineAdapter({ kind, detect, methods, neutral, detail }) {
-  if (typeof detect !== 'function') {
-    throw new TypeError('[cf-billing-guard] defineAdapter: detect(v) is required');
-  }
-  if (!Array.isArray(methods) || methods.length === 0) {
-    throw new TypeError('[cf-billing-guard] defineAdapter: methods[] is required');
-  }
-  const neutralOf = typeof neutral === 'function' ? neutral : () => undefined;
-  const detailOf = typeof detail === 'function' ? detail : () => ({});
-  const adapter = {
-    kind: kind || 'custom',
-    detect,
-    wrap(target, ledger, binding) {
-      const k = adapter.kind; // resolved at wrap time — relabeling via the registry key works
-      return new Proxy(target, {
-        get(t, prop) {
-          if (prop === WRAPPED) return true;
-          if (!methods.includes(prop)) {
-            const v = Reflect.get(t, prop);
-            return typeof v === 'function' ? v.bind(t) : v;
-          }
-          return async (...args) => {
-            const decision = ledger.beforeCall(binding, k, prop, 1);
-            if (decision === 'throw') throw ledger.exceededError(binding, k, prop);
-            if (decision === 'empty') return neutralOf(prop, args);
-            const res = await t[prop](...args);
-            ledger.afterCall(binding, k, prop, detailOf(args), 1);
-            return res;
-          };
-        },
-      });
-    },
-  };
-  return adapter;
-}
 
 /**
  * Generic observer for bindings that match no adapter: counts every method

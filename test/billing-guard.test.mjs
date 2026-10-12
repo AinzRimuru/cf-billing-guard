@@ -549,22 +549,23 @@ test('custom adapters take precedence over built-in d1/kv detection', async () =
   assert.equal(kv.calls.length, 1);
 });
 
-test('observe: unknown bindings are counted under kind observed, never blocked', async () => {
-  const queue = { sent: 0, async send(m) { this.sent++; }, async sendBatch(ms) { this.sent += ms.length; } };
+test('observe: bindings that match no adapter are counted under kind observed, never blocked', async () => {
+  // hypothetical service shape: matches none of the built-in adapters
+  const pipes = { created: 0, async create(x) { this.created++; return { id: x }; }, async get(id) { return null; } };
   const counted = [];
   let summary = null;
   const worker = withBillingGuard(
     { fetch: async (r, env) => {
-        for (let i = 0; i < 5; i++) await env.QUEUE.send('m' + i); // no limit ever
+        for (let i = 0; i < 5; i++) await env.PIPELINES.create('m' + i); // no limit ever
         return new Response('ok');
       } },
     { observe: true, count: (i) => counted.push(`${i.binding}:${i.method}`), onRequestEnd: (s) => (summary = s) }
   );
-  await worker.fetch(req(), { QUEUE: queue });
-  assert.equal(queue.sent, 5);
+  await worker.fetch(req(), { PIPELINES: pipes });
+  assert.equal(pipes.created, 5);
   assert.equal(counted.length, 5);
-  assert.ok(counted.every((c) => c === 'QUEUE:send'));
-  const slot = summary.bindings.find((b) => b.binding === 'QUEUE');
+  assert.ok(counted.every((c) => c === 'PIPELINES:create'));
+  const slot = summary.bindings.find((b) => b.binding === 'PIPELINES');
   assert.equal(slot.kind, 'observed');
   assert.equal(slot.used, 5);
   assert.equal(slot.blocked, 0);
@@ -581,4 +582,111 @@ test('observe: selective names; unlisted unknown bindings stay untouched', async
   );
   await worker.fetch(req(), { Q1: q1, Q2: q2 });
   assert.deepEqual(counted, ['Q1']);
+});
+
+// ---------- built-in service adapters (no registration needed) ----------
+
+test('built-in r2 adapter guards R2-shaped bindings by default', async () => {
+  const r2 = mockR2();
+  const counted = [];
+  const worker = withBillingGuard(
+    { fetch: async (r, env) => {
+        await env.BUCKET.get('a');                          // 1/2
+        await env.BUCKET.list();                            // 2/2
+        let blocked = false;
+        try { await env.BUCKET.put('b', 'v'); } catch (e) { blocked = e instanceof BillingGuardError; }
+        return new Response(String(blocked));
+      } },
+    { r2: { maxCalls: 2 }, count: (i) => counted.push(i.kind) }
+  );
+  const res = await worker.fetch(req(), { BUCKET: r2 });
+  assert.equal(await res.text(), 'true');
+  assert.deepEqual(counted, ['r2', 'r2']);
+  assert.equal(r2.calls.length, 2);
+});
+
+test('built-in queue adapter: send counts 1, sendBatch counts N all-or-nothing', async () => {
+  const sent = [];
+  const queue = {
+    async send(m) { sent.push(m); },
+    async sendBatch(ms) { sent.push(...ms); },
+  };
+  const worker = withBillingGuard(
+    { fetch: async (r, env) => {
+        await env.QUEUE.send('a');                        // 1/3
+        await env.QUEUE.sendBatch(['b', 'c']);            // +2 = 3/3
+        let blocked = false;
+        try { await env.QUEUE.send('d'); } catch (e) { blocked = e instanceof BillingGuardError; }
+        return new Response(String(blocked));
+      } },
+    { queue: { maxCalls: 3 } }
+  );
+  const res = await worker.fetch(req(), { QUEUE: queue });
+  assert.equal(await res.text(), 'true');
+  assert.deepEqual(sent, ['a', 'b', 'c']); // 'd' never reached the driver
+});
+
+test('built-in vectorize adapter: upsert counts per vector', async () => {
+  const upserted = [];
+  const idx = {
+    async upsert(vectors) { upserted.push(...vectors); },
+    async query(v) { return { matches: [], count: 0 }; },
+  };
+  const worker = withBillingGuard(
+    { fetch: async (r, env) => {
+        await env.VEC.upsert([{ id: 1 }, { id: 2 }, { id: 3 }]); // 3/3
+        let blocked = false;
+        try { await env.VEC.query([1]); } catch (e) { blocked = e instanceof BillingGuardError; }
+        return new Response(String(blocked));
+      } },
+    { vectorize: { maxCalls: 3 } }
+  );
+  const res = await worker.fetch(req(), { VEC: idx });
+  assert.equal(await res.text(), 'true');
+  assert.equal(upserted.length, 3); // query never reached the driver
+});
+
+test('built-in analytics and ai adapters count by default', async () => {
+  const events = [];
+  const ae = { async writeDataPoint(e) { events.push(e); } };
+  const ai = { async run(model) { events.push(model); return 'ok'; }, async toImage() {} };
+  const counted = [];
+  const worker = withBillingGuard(
+    { fetch: async (r, env) => {
+        await env.AE.writeDataPoint({ blobs: ['x'] });
+        await env.AI.run('@cf/model');
+        return new Response('ok');
+      } },
+    { count: (i) => counted.push(i.kind) }
+  );
+  await worker.fetch(req(), { AE: ae, AI: ai });
+  assert.deepEqual(counted.sort(), ['ai', 'analytics']);
+  assert.equal(events.length, 2);
+});
+
+test('built-in do adapter: stub fetch/RPC calls counted and limited', async () => {
+  const stubCalls = [];
+  const mkStub = () => ({
+    async fetch(path) { stubCalls.push(['fetch', path]); return { ok: true }; },
+    async increment(n) { stubCalls.push(['rpc', n]); return n + 1; },
+  });
+  const ns = {
+    idFromName: (n) => ({ name: n }),
+    newUniqueId: () => ({ name: 'u' }),
+    get: (id) => mkStub(),
+  };
+  const worker = withBillingGuard(
+    { fetch: async (r, env) => {
+        const stub = env.COUNTERS.get(env.COUNTERS.idFromName('a'));
+        await stub.fetch('/path');          // 1/2
+        await stub.increment(1);            // 2/2
+        let blocked = false;
+        try { await stub.fetch('/x'); } catch (e) { blocked = e instanceof BillingGuardError; }
+        return new Response(String(blocked));
+      } },
+    { do: { maxCalls: 2 } }
+  );
+  const res = await worker.fetch(req(), { COUNTERS: ns });
+  assert.equal(await res.text(), 'true');
+  assert.deepEqual(stubCalls, [['fetch', '/path'], ['rpc', 1]]);
 });
