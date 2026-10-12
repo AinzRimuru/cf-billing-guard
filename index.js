@@ -2,7 +2,7 @@
  * index.js — cf-billing-guard package entry.
  *
  * Wraps a Worker entry so every inbound request gets a per-request Ledger and
- * Proxy-wrapped D1/KV bindings. Business code keeps calling env.DB / env.KV
+ * Proxy-wrapped bindings. Business code keeps calling env.DB / env.KV
  * exactly as before; calls beyond the per-request limit are blocked with a
  * rejected promise or a neutral empty result.
  *
@@ -17,11 +17,16 @@
  *   defaults: { maxCalls?: number = 100, onExceed?: 'throw'|'empty' = 'throw' }
  *   d1:       same shape, overrides all D1 bindings
  *   kv:       same shape, overrides all KV bindings
+ *   [kind]:   same shape, policy for any custom adapter kind
  *   bindings: { [name]: same shape }  per-binding override (highest priority);
  *             doubles as a whitelist — when set, only the listed names are
  *             wrapped, so other binding kinds (R2, Durable Objects, Queues,
  *             ...) are never touched. The CLI derives this list from the
  *             wrangler config (d1_databases / kv_namespaces).
+ *   adapters: { [kind]: adapter }  custom adapters, take precedence over the
+ *             built-in d1/kv ones (see defineAdapter).
+ *   observe:  true | string[]  count method calls on bindings that match no
+ *             adapter (kind 'observed', never blocked).
  *   count(info)        after every real call (metrics)
  *   onExceeded(info)   first blocked call per binding per request (alerting)
  *   onRequestEnd(summary)  usage summary when the request ends (logging)
@@ -34,12 +39,6 @@ import { wrapKV } from './kv.js';
 export { BillingGuardError } from './ledger.js';
 export { wrapD1 } from './d1.js';
 export { wrapKV } from './kv.js';
-/**
- * Shape-based D1/KV detection is a best-effort fallback for manual wiring.
- * Anything that matches neither shape is passed through untouched. Prefer the
- * explicit `bindings` whitelist (the CLI generates it from the wrangler config)
- * to guarantee other binding kinds are never inspected.
- */
 
 /** Detect D1Database by shape (prepare/batch/exec). */
 function looksLikeD1(v) {
@@ -61,23 +60,147 @@ function looksLikeKV(v) {
   );
 }
 
-/** Wrap env with a per-request Ledger (call once per request; wrappers are discarded with it). */
+/**
+ * Built-in adapters. D1 and KV are just two entries in the registry — custom
+ * adapters registered via options.adapters are matched first and can override.
+ */
+const BUILTIN_ADAPTERS = [
+  { kind: 'd1', detect: looksLikeD1, wrap: wrapD1 },
+  { kind: 'kv', detect: looksLikeKV, wrap: wrapKV },
+];
+
+/** Normalize + validate custom adapters; user adapters take precedence over built-ins. */
+function buildAdapters(custom) {
+  const list = [];
+  for (const [key, a] of Object.entries(custom || {})) {
+    const adapter = a && typeof a === 'object' ? a : null;
+    if (!adapter || typeof adapter.detect !== 'function' || typeof adapter.wrap !== 'function') {
+      throw new TypeError(
+        `[cf-billing-guard] invalid adapter "${key}": expected { kind?, detect(v), wrap(target, ledger, name) } — see defineAdapter()`
+      );
+    }
+    // default kinds (defineAdapter without kind) adopt the registry key,
+    // so options[key] resolves the policy; explicit kinds are left alone
+    if (!adapter.kind || adapter.kind === 'custom') adapter.kind = key;
+    list.push(adapter);
+  }
+  return [...list, ...BUILTIN_ADAPTERS];
+}
+
+/**
+ * Define a binding adapter declaratively: detect by shape, count the listed
+ * methods (1 call each), neutralize on 'empty'. Returns an adapter suitable
+ * for options.adapters.
+ *
+ *   const r2 = defineAdapter({
+ *     detect: (v) => typeof v.head === 'function' && typeof v.list === 'function',
+ *     methods: ['get', 'put', 'head', 'delete', 'list'],
+ *     neutral: (method) => (method === 'get' || method === 'head' ? null : method === 'list' ? { objects: [] } : undefined),
+ *   });
+ *   withBillingGuard(worker, { adapters: { r2 }, r2: { maxCalls: 50 } });
+ *
+ * @param {object} spec
+ * @param {string} [spec.kind] adapter kind (defaults to the key used in options.adapters)
+ * @param {(v: object) => boolean} spec.detect shape detection
+ * @param {string[]} spec.methods the counting surface
+ * @param {(method: string, args: any[]) => any} [spec.neutral] result returned when over limit in 'empty' mode
+ * @param {(args: any[]) => object} [spec.detail] extra info for the count callback
+ */
+export function defineAdapter({ kind, detect, methods, neutral, detail }) {
+  if (typeof detect !== 'function') {
+    throw new TypeError('[cf-billing-guard] defineAdapter: detect(v) is required');
+  }
+  if (!Array.isArray(methods) || methods.length === 0) {
+    throw new TypeError('[cf-billing-guard] defineAdapter: methods[] is required');
+  }
+  const neutralOf = typeof neutral === 'function' ? neutral : () => undefined;
+  const detailOf = typeof detail === 'function' ? detail : () => ({});
+  const adapter = {
+    kind: kind || 'custom',
+    detect,
+    wrap(target, ledger, binding) {
+      const k = adapter.kind; // resolved at wrap time — relabeling via the registry key works
+      return new Proxy(target, {
+        get(t, prop) {
+          if (prop === WRAPPED) return true;
+          if (!methods.includes(prop)) {
+            const v = Reflect.get(t, prop);
+            return typeof v === 'function' ? v.bind(t) : v;
+          }
+          return async (...args) => {
+            const decision = ledger.beforeCall(binding, k, prop, 1);
+            if (decision === 'throw') throw ledger.exceededError(binding, k, prop);
+            if (decision === 'empty') return neutralOf(prop, args);
+            const res = await t[prop](...args);
+            ledger.afterCall(binding, k, prop, detailOf(args), 1);
+            return res;
+          };
+        },
+      });
+    },
+  };
+  return adapter;
+}
+
+/**
+ * Generic observer for bindings that match no adapter: counts every method
+ * call (kind 'observed'), never blocks. No service-specific knowledge needed,
+ * so it covers any binding type, present or future.
+ */
+function wrapObserved(target, ledger, name) {
+  const cache = new Map();
+  return new Proxy(target, {
+    get(t, prop) {
+      if (prop === WRAPPED) return true;
+      if (typeof prop !== 'string') return Reflect.get(t, prop);
+      const v = Reflect.get(t, prop);
+      if (typeof v !== 'function') return v;
+      if (cache.has(prop)) return cache.get(prop);
+      const fn = async (...args) => {
+        const res = await t[prop](...args);
+        ledger.afterCall(name, 'observed', prop, {}, 1);
+        return res;
+      };
+      cache.set(prop, fn);
+      return fn;
+    },
+  });
+}
+
+/**
+ * Wrap env with a per-request Ledger (call once per request; wrappers are
+ * discarded with it). Matching order: custom adapters → built-in d1/kv →
+ * observe (if enabled) → untouched pass-through.
+ */
 export function instrumentEnv(env, ledger) {
   if (!env || typeof env !== 'object') return env;
   const cache = new Map(); // binding name -> wrapped binding, for this request
+  const adapters = buildAdapters(ledger.options.adapters);
+  const observe = ledger.options.observe;
+  const observeAll = observe === true;
+  const observeNames = Array.isArray(observe) ? new Set(observe) : null;
   return new Proxy(env, {
     get(target, prop) {
       if (typeof prop !== 'string') return Reflect.get(target, prop);
       const v = Reflect.get(target, prop);
       if (!v || typeof v !== 'object' || v[WRAPPED]) return v;
-      if (!looksLikeD1(v) && !looksLikeKV(v)) return v;
-      // bindings whitelist (when configured): anything not listed stays unwrapped
-      const allow = ledger.options.bindings;
-      if (allow && !Object.prototype.hasOwnProperty.call(allow, prop)) return v;
-      if (cache.has(prop)) return cache.get(prop);
-      const wrapped = looksLikeD1(v) ? wrapD1(v, ledger, prop) : wrapKV(v, ledger, prop);
-      cache.set(prop, wrapped);
-      return wrapped;
+      const adapter = adapters.find((a) => a.detect(v));
+      if (adapter) {
+        // bindings whitelist (when configured): anything not listed stays unwrapped
+        const allow = ledger.options.bindings;
+        if (allow && !Object.prototype.hasOwnProperty.call(allow, prop)) return v;
+        if (cache.has(prop)) return cache.get(prop);
+        const wrapped = adapter.wrap(v, ledger, prop);
+        cache.set(prop, wrapped);
+        return wrapped;
+      }
+      if (observeAll || (observeNames && observeNames.has(prop))) {
+        if (cache.has(prop)) return cache.get(prop);
+        const wrapped = wrapObserved(v, ledger, prop);
+        cache.set(prop, wrapped);
+        return wrapped;
+      }
+      return v;
     },
   });
 }

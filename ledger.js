@@ -65,11 +65,12 @@ export class Ledger {
     this.slots = new Map(); // binding name -> Slot
   }
 
-  /** Resolve the policy for a binding: bindings[name] > [kind] > defaults */
+  /** Resolve the policy for a binding: bindings[name] > [kind] > defaults (any adapter kind) */
   policyFor(name, kind) {
     const o = this.options || {};
     const defaults = { maxCalls: 100, onExceed: 'throw', ...(o.defaults || {}) };
-    const byKind = kind === 'd1' ? o.d1 : kind === 'kv' ? o.kv : undefined;
+    // observed bindings are pure observability: counted, never limited
+    const byKind = kind === 'observed' ? { maxCalls: Infinity } : o[kind];
     const byName = o.bindings && o.bindings[name];
     return { ...defaults, ...(byKind || {}), ...(byName || {}) };
   }

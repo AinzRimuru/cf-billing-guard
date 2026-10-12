@@ -7,7 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { withBillingGuard, withBillingGuardDO, instrumentEnv, BillingGuardError } from '../index.js';
+import { withBillingGuard, withBillingGuardDO, instrumentEnv, defineAdapter, BillingGuardError } from '../index.js';
 import { Ledger } from '../ledger.js';
 
 // ---------- mocks ----------
@@ -468,4 +468,117 @@ test('withBillingGuardDO: each inbound fetch()/alarm() starts from a fresh budge
   await inst.alarm();
   await inst.alarm();
   assert.equal(db.calls.filter((c) => c[0] === 'all').length, 4); // 1 pass per fetch ×2, 1 per alarm ×2
+});
+
+// ---------- custom adapters / observe ----------
+
+function mockR2() {
+  const calls = [];
+  return {
+    calls,
+    async get(k) { calls.push(['get', k]); return { key: k }; },
+    async put(k, v) { calls.push(['put', k]); },
+    async head(k) { calls.push(['head', k]); return null; },
+    async delete(k) { calls.push(['delete', k]); },
+    async list() { calls.push(['list']); return { objects: [{ key: 'a' }] }; },
+  };
+}
+
+const r2Adapter = defineAdapter({
+  detect: (v) => typeof v.get === 'function' && typeof v.put === 'function' && typeof v.head === 'function',
+  methods: ['get', 'put', 'head', 'delete', 'list'],
+  neutral: (m) => (m === 'get' || m === 'head' ? null : m === 'list' ? { objects: [] } : undefined),
+});
+
+test('custom adapter: R2-style binding counted and limited like a first-class kind', async () => {
+  const r2 = mockR2();
+  const counted = [];
+  const worker = withBillingGuard(
+    { fetch: async (r, env) => {
+        await env.BUCKET.get('a');                          // 1/2
+        await env.BUCKET.put('b', 'v');                     // 2/2
+        let blocked = false;
+        try { await env.BUCKET.get('c'); } catch (e) { blocked = e instanceof BillingGuardError; }
+        return new Response(JSON.stringify({ blocked }));
+      } },
+    {
+      adapters: { r2: r2Adapter },
+      r2: { maxCalls: 2, onExceed: 'throw' },
+      count: (i) => counted.push(`${i.kind}:${i.method}`),
+    }
+  );
+  const res = await worker.fetch(req(), { BUCKET: r2 });
+  const body = JSON.parse(await res.text());
+  assert.equal(body.blocked, true);
+  assert.deepEqual(counted, ['r2:get', 'r2:put']);
+  assert.equal(r2.calls.length, 2); // the blocked call never reached the driver
+});
+
+test('custom adapter: onExceed=empty returns neutral results', async () => {
+  const r2 = mockR2();
+  const worker = withBillingGuard(
+    { fetch: async (r, env) => {
+        await env.BUCKET.get('a');                 // real (1/1)
+        const g = await env.BUCKET.get('b');       // neutral → null
+        const l = await env.BUCKET.list();         // neutral → {objects:[]}
+        return new Response(JSON.stringify({ g, l }));
+      } },
+    { adapters: { r2: r2Adapter }, r2: { maxCalls: 1, onExceed: 'empty' } }
+  );
+  const res = await worker.fetch(req(), { BUCKET: r2 });
+  const body = JSON.parse(await res.text());
+  assert.equal(body.g, null);
+  assert.deepEqual(body.l, { objects: [] });
+  assert.equal(r2.calls.length, 1);
+});
+
+test('custom adapters take precedence over built-in d1/kv detection', async () => {
+  const kv = mockKV();
+  const counted = [];
+  const relabel = {
+    kind: 'cache',
+    detect: (v) => typeof v.getWithMetadata === 'function',
+    wrap: (t, ledger, name) => t, // passthrough wrap: no counting here
+  };
+  const worker = withBillingGuard(
+    { fetch: async (r, env) => { await env.KV.get('a'); return new Response('ok'); } },
+    { adapters: { cache: relabel }, count: (i) => counted.push(i.kind) }
+  );
+  await worker.fetch(req(), { KV: kv });
+  assert.equal(counted.length, 0); // custom adapter won; its passthrough wrap does not count
+  assert.equal(kv.calls.length, 1);
+});
+
+test('observe: unknown bindings are counted under kind observed, never blocked', async () => {
+  const queue = { sent: 0, async send(m) { this.sent++; }, async sendBatch(ms) { this.sent += ms.length; } };
+  const counted = [];
+  let summary = null;
+  const worker = withBillingGuard(
+    { fetch: async (r, env) => {
+        for (let i = 0; i < 5; i++) await env.QUEUE.send('m' + i); // no limit ever
+        return new Response('ok');
+      } },
+    { observe: true, count: (i) => counted.push(`${i.binding}:${i.method}`), onRequestEnd: (s) => (summary = s) }
+  );
+  await worker.fetch(req(), { QUEUE: queue });
+  assert.equal(queue.sent, 5);
+  assert.equal(counted.length, 5);
+  assert.ok(counted.every((c) => c === 'QUEUE:send'));
+  const slot = summary.bindings.find((b) => b.binding === 'QUEUE');
+  assert.equal(slot.kind, 'observed');
+  assert.equal(slot.used, 5);
+  assert.equal(slot.blocked, 0);
+  assert.equal(slot.limit, Infinity);
+});
+
+test('observe: selective names; unlisted unknown bindings stay untouched', async () => {
+  const q1 = { async send() {} };
+  const q2 = { async send() {} };
+  const counted = [];
+  const worker = withBillingGuard(
+    { fetch: async (r, env) => { await env.Q1.send(); await env.Q2.send(); return new Response('ok'); } },
+    { observe: ['Q1'], count: (i) => counted.push(i.binding) }
+  );
+  await worker.fetch(req(), { Q1: q1, Q2: q2 });
+  assert.deepEqual(counted, ['Q1']);
 });

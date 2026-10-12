@@ -74,11 +74,35 @@ Wraps a Worker entry. `fetch` is required; `scheduled`, `queue`, `test`, `email`
 | `defaults` | `{maxCalls?, onExceed?}` | `{100, 'throw'}` | fallback policy |
 | `d1` / `kv` | same shape | — | per binding kind |
 | `bindings` | `{[name]: same shape}` | — | per binding name (highest priority); also acts as a whitelist |
+| `[kind]` | same shape | — | policy for any custom adapter kind (e.g. `r2`) |
+| `adapters` | `{[kind]: adapter}` | built-in `d1`/`kv` | custom adapters; matched before the built-ins |
+| `observe` | `true \| string[]` | — | count method calls on bindings that match no adapter (`kind: 'observed'`, never blocked) |
 | `count` | `(info) => void` | — | after every real call: `{binding, kind, method, used, limit, sql?/key?}` |
 | `onExceeded` | `(info) => void` | — | first blocked call per binding per request |
 | `onRequestEnd` | `(summary) => void` | — | request finished: `{bindings:[{binding,kind,used,limit,blocked,onExceed}]}` |
 
 `maxCalls: Infinity` disables a limit while keeping the counters.
+
+### Extending
+
+Adapters decide how a binding kind is detected, counted and neutralized — D1 and KV are just two built-in entries. Register more with `defineAdapter`:
+
+```js
+import { withBillingGuard, defineAdapter } from 'cf-billing-guard';
+
+const r2 = defineAdapter({
+  detect: (v) => typeof v.head === 'function' && typeof v.list === 'function',
+  methods: ['get', 'put', 'head', 'delete', 'list'],
+  neutral: (m) => (m === 'get' || m === 'head' ? null : m === 'list' ? { objects: [] } : undefined),
+});
+
+export default withBillingGuard(worker, {
+  adapters: { r2 },   // kind adopts the registry key → policy lives under options.r2
+  r2: { maxCalls: 50 },
+});
+```
+
+A full adapter is a plain `{ kind, detect(v), wrap(target, ledger, name) }` (what `defineAdapter` builds for you). Custom adapters are matched **before** the built-ins, so they can also override d1/kv. Bindings that match no adapter pass through untouched; opt into method-call counting for them with `observe: true` (or `observe: ['NAME']`) — reported as `kind: 'observed'`, never blocked.
 
 
 ### CLI reference

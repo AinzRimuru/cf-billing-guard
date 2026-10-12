@@ -74,11 +74,35 @@ export default withBillingGuard(worker, {
 | `defaults` | `{maxCalls?, onExceed?}` | `{100, 'throw'}` | 兜底策略 |
 | `d1` / `kv` | 同上 | — | 按绑定类型 |
 | `bindings` | `{[name]: 同上}` | — | 按绑定名覆盖（优先级最高），且充当白名单 |
+| `[kind]` | 同上 | — | 任意自定义适配器类型的策略（如 `r2`） |
+| `adapters` | `{[kind]: adapter}` | 内建 `d1`/`kv` | 自定义适配器；先于内建匹配 |
+| `observe` | `true \| string[]` | — | 对未匹配适配器的绑定按方法计数（`kind: 'observed'`，永不拦截） |
 | `count` | `(info) => void` | — | 每次真实调用后触发：`{binding, kind, method, used, limit, sql?/key?}` |
 | `onExceeded` | `(info) => void` | — | 某绑定首次被拦截时触发（每请求每绑定一次） |
 | `onRequestEnd` | `(summary) => void` | — | 请求结束触发：`{bindings:[{binding,kind,used,limit,blocked,onExceed}]}` |
 
 `maxCalls: Infinity` 可关闭限制、仅保留计数。
+
+### 扩展
+
+适配器（adapter）决定一类绑定如何被探测、计数与拦截——D1/KV 只是两个内建条目。用 `defineAdapter` 注册更多：
+
+```js
+import { withBillingGuard, defineAdapter } from 'cf-billing-guard';
+
+const r2 = defineAdapter({
+  detect: (v) => typeof v.head === 'function' && typeof v.list === 'function',
+  methods: ['get', 'put', 'head', 'delete', 'list'],
+  neutral: (m) => (m === 'get' || m === 'head' ? null : m === 'list' ? { objects: [] } : undefined),
+});
+
+export default withBillingGuard(worker, {
+  adapters: { r2 },   // kind 自动采用注册键名 → 策略写在 options.r2
+  r2: { maxCalls: 50 },
+});
+```
+
+完整适配器是普通的 `{ kind, detect(v), wrap(target, ledger, name) }`（`defineAdapter` 帮你生成的就是它）。自定义适配器**先于**内建匹配，因此也能覆盖 d1/kv。未匹配任何适配器的绑定原样透传；可用 `observe: true`（或 `observe: ['NAME']`）对其按方法计数——以 `kind: 'observed'` 上报，永不拦截。
 
 ### CLI 参考
 
