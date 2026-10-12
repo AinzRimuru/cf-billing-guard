@@ -52,19 +52,6 @@ export default withBillingGuard(worker, {
 - 包装按请求创建，计数精确且天然隔离——无跨请求状态，无 isolate 级近似。
 - 重复包装幂等（`Symbol.for('cf-billing-guard.wrapped')`）。
 
-## 计数口径
-
-一次调用 = 一次真实执行。
-
-| 绑定 | 调用 | 计数 |
-|---|---|---|
-| D1 | `prepare().bind()` 未执行 | 0 |
-| D1 | `first() / all() / run() / raw() / values()` | 1 |
-| D1 | `batch([s1..sN])` | N（整批放行或整批拦截） |
-| D1 | `exec(sql)` | 1 |
-| D1 | `withSession(fn)` | 经包装 session 正常计数 |
-| KV | `get / getWithMetadata / put / delete / list` | 1 |
-
 ## 拦截语义（`onExceed`）
 
 被拦截的调用绝不同步 throw——一律以 rejected Promise 或空结果呈现，链式的 `.catch(() => {})` 和 try/catch 降级路径照常工作。
@@ -93,13 +80,6 @@ export default withBillingGuard(worker, {
 
 `maxCalls: Infinity` 可关闭限制、仅保留计数。
 
-### 其余导出
-
-- `instrumentEnv(env, ledger)`——用于自建入口或测试。
-- `withBillingGuardDO(DOClass, options?)`——包装 Durable Object 类。runtime 实例化导出的 DO 类时给的是**原始 env**，Worker 级包装看不到；此包装器会接管构造函数的 env（构造时捕获的 `this.db = env.DB` 也会被计数），且每次入站 `fetch()` / `alarm()` 独立配额。
-- `wrapD1(db, ledger, name)` / `wrapKV(ns, ledger, name)`——直接包装单个绑定。
-- `Ledger`、`BillingGuardError`——`error.binding / kind / used / limit` 可供上层识别。
-
 ### CLI 参考
 
 ```
@@ -116,14 +96,6 @@ cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
 - 未配置 `bindings` 白名单时退回按方法签名探测（对真实 Cloudflare 绑定几乎不可能误判；用 `--bindings` 或 `bindings` 选项可显式固定名单）。
 - `exec()` 含多条语句仍计 1 次（Cloudflare 也按一次 API 调用计费）。
 - 未覆盖的方法默认透传不计数——包装不会破坏新 API。
-
-## 开发
-
-```bash
-npm test   # 22 个用例：计数口径、两种拦截模式、回调、请求隔离、业务降级、CLI
-```
-
-发布由 GitHub Actions 在创建 GitHub Release 时自动完成（`.github/workflows/publish.yml`），采用 [Trusted Publishing](https://docs.npmjs.com/trusted-publishers)（OIDC）——无需在 Secrets 里存长期 npm token，provenance 溯源凭证自动生成。CI 在 Node 18/20/22/24 矩阵上运行测试。
 
 ## 许可证
 

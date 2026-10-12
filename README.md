@@ -52,19 +52,6 @@ request ─▶ withBillingGuard(worker).fetch
 - Wrappers are created per request, so counters are exact and isolated — no cross-request state, no isolate-level approximation.
 - Double wrapping is a no-op (`Symbol.for('cf-billing-guard.wrapped')`).
 
-## Counting rules
-
-One call = one real execution.
-
-| Binding | Call | Count |
-|---|---|---|
-| D1 | `prepare().bind()` without executing | 0 |
-| D1 | `first() / all() / run() / raw() / values()` | 1 |
-| D1 | `batch([s1..sN])` | N (all-or-nothing) |
-| D1 | `exec(sql)` | 1 |
-| D1 | `withSession(fn)` | counted through the wrapped session |
-| KV | `get / getWithMetadata / put / delete / list` | 1 |
-
 ## Blocking semantics (`onExceed`)
 
 Blocked calls never throw synchronously — they surface as a rejected promise or a neutral result, so chained `.catch(() => {})` and try/catch fallbacks keep working.
@@ -93,12 +80,6 @@ Wraps a Worker entry. `fetch` is required; `scheduled`, `queue`, `test`, `email`
 
 `maxCalls: Infinity` disables a limit while keeping the counters.
 
-### Other exports
-
-- `instrumentEnv(env, ledger)` — for custom entries or tests.
-- `withBillingGuardDO(DOClass, options?)` — wrap a Durable Object class. The runtime instantiates exported DO classes with the **raw** env, which the worker-level wrapper never sees; this wrapper instruments the constructor's env (bindings captured as `this.db = env.DB` are counted too) and gives every inbound `fetch()` / `alarm()` a fresh budget.
-- `wrapD1(db, ledger, name)` / `wrapKV(ns, ledger, name)` — wrap a binding directly.
-- `Ledger`, `BillingGuardError` — `error.binding / kind / used / limit` for upstream handling.
 
 ### CLI reference
 
@@ -115,15 +96,7 @@ cf-billing-guard disable [--config <path>] [--out <path>] [--keep] [--dry-run]
 - Durable Objects: `constructor(ctx, env)` receives the raw env, outside the worker-level wrapper — wrap each class with `withBillingGuardDO`. The CLI-generated wrapper re-exports your entry's named exports unchanged (so DO bindings keep working), but it cannot detect DO classes automatically. Class-RPC methods other than `fetch`/`alarm`, and callbacks running after a response is returned (e.g. WebSocket message handlers), continue on the previous call's budget.
 - Manual wiring without a `bindings` whitelist falls back to shape-based detection (false positives are near-impossible for real Cloudflare bindings; pass `--bindings` or set `bindings` to pin names explicitly).
 - `exec()` counts as 1 even with multiple statements (Cloudflare bills it as one API call).
-- Methods not covered above are passed through uncounted — wrapping never breaks new APIs.
-
-## Development
-
-```bash
-npm test   # 22 tests: counting, both block modes, callbacks, isolation, degradation, CLI
-```
-
-Releases are published to npm by GitHub Actions whenever a GitHub Release is created (`.github/workflows/publish.yml`), using [trusted publishing](https://docs.npmjs.com/trusted-publishers) (OIDC) — no long-lived npm token stored as a secret; provenance attestations are generated automatically. CI runs the test matrix on Node 18/20/22/24.
+- Methods not covered are passed through uncounted — wrapping never breaks new APIs.
 
 ## License
 
