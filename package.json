@@ -1,6 +1,6 @@
 {
   "name": "cf-billing-guard",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "description": "Per-request D1/KV call limiter for Cloudflare Workers — zero-intrusion Proxy wrapping that keeps runaway requests off your bill",
   "license": "MIT",
   "repository": {
