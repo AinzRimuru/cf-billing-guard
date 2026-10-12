@@ -56,6 +56,12 @@ export default withBillingGuard(worker, {
 
 内建适配器——默认生效，策略写在 `options.<kind>`：
 
+```js
+withBillingGuard(worker, { r2: { maxCalls: 50 }, queue: { maxCalls: 100 } }); // 按类型限额
+```
+
+CLI 用户：直接编辑生成的 `billing-guard.main.js`——在 `d1`/`kv` 旁边加对应类型的一行。按绑定名覆盖（`bindings: { BUCKET: { maxCalls: 10 } }`）对所有类型同样有效。
+
 | kind | 计数 | `'empty'` 中立结果 |
 |---|---|---|
 | `d1` | 终结方法 1 次；`batch` N 次；`exec` 1 次 | 同构空结果 |
@@ -92,7 +98,7 @@ export default withBillingGuard(worker, {
 | `defaults` | `{maxCalls?, onExceed?}` | `{100, 'throw'}` | 兜底策略 |
 | `d1` / `kv` | 同上 | — | 按绑定类型 |
 | `bindings` | `{[name]: 同上}` | — | 按绑定名覆盖（优先级最高），且充当白名单 |
-| `[kind]` | 同上 | — | 任意自定义适配器类型的策略（如 `r2`） |
+| `[kind]` | 同上 | — | 任意适配器类型的策略——内建（`r2`、`queue`……）或自定义 |
 | `adapters` | `{[kind]: adapter}` | 内建 `d1`/`kv` | 自定义适配器；先于内建匹配 |
 | `observe` | `true \| string[]` | — | 对未匹配适配器的绑定按方法计数（`kind: 'observed'`，永不拦截） |
 | `count` | `(info) => void` | — | 每次真实调用后触发：`{binding, kind, method, used, limit, sql?/key?}` |
@@ -103,20 +109,21 @@ export default withBillingGuard(worker, {
 
 ### 扩展
 
-适配器（adapter）决定一类绑定如何被探测、计数与拦截——D1/KV 只是两个内建条目。用 `defineAdapter` 注册更多：
+适配器（adapter）决定一类绑定如何被探测、计数与拦截——上表服务均为内建。对**未内建**的绑定类型，用 `defineAdapter` 注册：
 
 ```js
 import { withBillingGuard, defineAdapter } from 'cf-billing-guard';
 
-const r2 = defineAdapter({
-  detect: (v) => typeof v.head === 'function' && typeof v.list === 'function',
-  methods: ['get', 'put', 'head', 'delete', 'list'],
-  neutral: (m) => (m === 'get' || m === 'head' ? null : m === 'list' ? { objects: [] } : undefined),
+// 假想的搜索服务绑定（env.SEARCH）
+const search = defineAdapter({
+  detect: (v) => typeof v.query === 'function' && typeof v.index === 'function',
+  methods: ['query', 'index', 'delete'],
+  neutral: (m) => (m === 'query' ? { hits: [] } : undefined),
 });
 
 export default withBillingGuard(worker, {
-  adapters: { r2 },   // kind 自动采用注册键名 → 策略写在 options.r2
-  r2: { maxCalls: 50 },
+  adapters: { search },   // kind 自动采用注册键名 → 策略写在 options.search
+  search: { maxCalls: 20 },
 });
 ```
 
